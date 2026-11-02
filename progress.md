@@ -35,3 +35,11 @@
 - 踩坑：第一次测是 -91 dB 全静音——ffplay 那条测试音源没真正出声；换 `System.Media.SoundPlayer` 后立刻有电平
 - 验证：录 440 Hz 正弦 → 抽音轨做 DFT → **峰值正好 440 Hz**，max_volume -20.8 dB
 - 体积：551 KB → 498 KB（去掉 cpal）
+
+## 2026-11-02 · v0.2.1 边框常驻
+
+用户反馈：框选完成后边框就没了，应该在选中那一刻起一直保留，直到录制结束。
+
+- 原因：边框窗口是在 `begin_record` 里才创建的，选中到点「开始」之间是空档
+- 改法：`WM_LBUTTONUP` 里选中有效即 `create_frame`；`begin_record` 只在 frames 为空时补建；`stop_record` / 取消选区时 `destroy_frames`
+- 验证：截图对比「选中待录」与「录制中」两个状态，边框与计时条都在；出片抽帧仍无边框
