@@ -12,7 +12,9 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+use windows::Win32::UI::HiDpi::{
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, SetFocus, UnregisterHotKey, MOD_NOREPEAT, VK_F9,
 };
@@ -24,13 +26,10 @@ const CLS_CHIP: PCWSTR = w!("DogscRsChip");
 const CLS_FRAME: PCWSTR = w!("DogscRsFrame");
 const CLS_TOAST: PCWSTR = w!("DogscRsToast");
 
-/// 未选中区域：半透明黑（预乘 alpha）
+/// 未选中区域：半透明黑（0xAARRGGBB）
 const DIM: u32 = 0x6600_0000;
 /// 选区边框 / 录制框：琥珀 #FF9A4D
 const ACCENT: u32 = 0xFF_FF_9A_4D;
-
-const BAR_W: i32 = 236;
-const BAR_H: i32 = 48;
 
 const fn rgb(r: u32, g: u32, b: u32) -> COLORREF {
     COLORREF(r | (g << 8) | (b << 16))
@@ -43,7 +42,6 @@ const C_HOVER: COLORREF = rgb(0x2E, 0x2E, 0x32);
 
 struct Dib {
     hdc: HDC,
-    bmp: HBITMAP,
     ptr: *mut u32,
     w: i32,
     h: i32,
@@ -58,6 +56,7 @@ struct App {
     frames: Vec<HWND>,
     hfont: HFONT,
     hfont_bold: HFONT,
+    scale: f32,
     mon: RECT,
     mon_index: usize,
     sel: Option<RECT>,
@@ -82,6 +81,30 @@ fn app() -> &'static mut App {
     unsafe { APP.as_mut().expect("app not initialised") }
 }
 
+/// 逻辑像素 → 物理像素（按当前显示器缩放）
+fn s(v: i32) -> i32 {
+    let a = app();
+    (v as f32 * a.scale).round() as i32
+}
+
+fn bar_w() -> i32 {
+    s(236)
+}
+fn bar_h() -> i32 {
+    s(48)
+}
+
+pub fn log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"F:\tmp\dogsc-rs.log")
+    {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
 fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -99,8 +122,9 @@ fn main() {
             frames: Vec::new(),
             hfont: HFONT::default(),
             hfont_bold: HFONT::default(),
+            scale: 1.0,
             mon: RECT::default(),
-            mon_index: 0,
+            mon_index: 1,
             sel: None,
             drag: None,
             dib: None,
@@ -115,21 +139,7 @@ fn main() {
             first_frame: Arc::new(AtomicBool::new(false)),
             bar_hover: 0,
         });
-    }
-
-    unsafe {
-        let a = app();
-        a.hfont = CreateFontW(
-            -15, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Microsoft YaHei UI"),
-        );
-        a.hfont_bold = CreateFontW(
-            -15, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Microsoft YaHei UI"),
-        );
-        register_classes(a.hinst);
+        register_classes(app().hinst);
         open_overlay();
     }
 
@@ -163,18 +173,6 @@ unsafe fn register_classes(hinst: HINSTANCE) {
     }
 }
 
-
-pub fn log(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"F:\tmp\dogsc-rs.log")
-    {
-        let _ = writeln!(f, "{msg}");
-    }
-}
-
 fn cursor_point() -> POINT {
     let mut p = POINT::default();
     unsafe {
@@ -183,7 +181,6 @@ fn cursor_point() -> POINT {
     p
 }
 
-/// 光标所在显示器：返回 (rcMonitor, 设备名)
 unsafe fn monitor_under_cursor() -> (RECT, String) {
     let p = cursor_point();
     let hmon = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST);
@@ -197,7 +194,6 @@ unsafe fn monitor_under_cursor() -> (RECT, String) {
 }
 
 fn monitor_index_for(device: &str) -> usize {
-    // Monitor::from_index 是 1-based，且与 \\.\DISPLAYn 的 n 对齐
     device
         .rsplit("DISPLAY")
         .next()
@@ -206,7 +202,21 @@ fn monitor_index_for(device: &str) -> usize {
         .unwrap_or(1)
 }
 
-/// 打开选区遮罩
+unsafe fn make_fonts() {
+    let a = app();
+    let px = s(15);
+    a.hfont = CreateFontW(
+        -px, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Microsoft YaHei UI"),
+    );
+    a.hfont_bold = CreateFontW(
+        -px, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Microsoft YaHei UI"),
+    );
+}
+
 unsafe fn open_overlay() {
     let (mon, name) = monitor_under_cursor();
     let idx = monitor_index_for(&name);
@@ -219,7 +229,6 @@ unsafe fn open_overlay() {
     a.sel = None;
     a.drag = None;
 
-    // 32bpp DIB，自上而下
     let screen = GetDC(None);
     let mem = CreateCompatibleDC(Some(screen));
     let bmi = BITMAPINFO {
@@ -236,13 +245,11 @@ unsafe fn open_overlay() {
     };
     let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
     let bmp = CreateDIBSection(Some(mem), &bmi, DIB_RGB_COLORS, &mut ptr, None, 0).expect("dib");
-    let old = SelectObject(mem, HGDIOBJ(bmp.0));
+    let _ = SelectObject(mem, HGDIOBJ(bmp.0));
     ReleaseDC(None, screen);
-    let _ = old;
 
     a.dib = Some(Dib {
         hdc: mem,
-        bmp,
         ptr: ptr as *mut u32,
         w,
         h,
@@ -264,7 +271,11 @@ unsafe fn open_overlay() {
     )
     .expect("overlay window");
     a.overlay = hwnd;
-    log(&format!("overlay created hwnd={:?} rect={:?}", hwnd.0, mon));
+
+    // 按这台显示器的缩放比缩放整套 UI
+    let dpi = GetDpiForWindow(hwnd);
+    a.scale = if dpi >= 96 { dpi as f32 / 96.0 } else { 1.0 };
+    make_fonts();
 
     paint_overlay();
     let _ = ShowWindow(hwnd, SW_SHOW);
@@ -289,11 +300,10 @@ unsafe fn paint_overlay() {
                 let row = (y * w) as usize;
                 px[row + l as usize..row + r as usize].fill(0);
             }
-            // 2px 边框
-            let edge = 2i32;
+            let edge = (2.0 * a.scale).round() as i32;
             for y in t..b {
                 let row = (y * w) as usize;
-                let (a0, a1) = ((l).max(0) as usize, (l + edge).min(r) as usize);
+                let (a0, a1) = (l.max(0) as usize, (l + edge).min(r) as usize);
                 if a1 > a0 {
                     px[row + a0..row + a1].fill(ACCENT);
                 }
@@ -411,9 +421,10 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
         WM_LBUTTONUP => {
             let a = app();
             a.drag = None;
+            let min = s(32);
             let ok = a
                 .sel
-                .map(|s| (s.right - s.left) >= 32 && (s.bottom - s.top) >= 32)
+                .map(|sel| (sel.right - sel.left) >= min && (sel.bottom - sel.top) >= min)
                 .unwrap_or(false);
             if ok {
                 let _ = ShowWindow(hwnd, SW_HIDE);
@@ -442,16 +453,17 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
 unsafe fn show_bar() {
     let a = app();
     let Some(sel) = a.sel else { return };
-    let mut x = sel.right - BAR_W;
-    let mut y = sel.bottom + 12;
-    if y + BAR_H > a.mon.bottom {
-        y = sel.bottom - BAR_H - 12;
+    let (bw, bh) = (bar_w(), bar_h());
+    let mut x = sel.right - bw;
+    let mut y = sel.bottom + s(12);
+    if y + bh > a.mon.bottom {
+        y = sel.bottom - bh - s(12);
     }
     if y < a.mon.top {
-        y = sel.top + 12;
+        y = sel.top + s(12);
     }
     if x < a.mon.left {
-        x = a.mon.left + 8;
+        x = a.mon.left + s(8);
     }
 
     let hwnd = CreateWindowExW(
@@ -461,8 +473,8 @@ unsafe fn show_bar() {
         WS_POPUP,
         x,
         y,
-        BAR_W,
-        BAR_H,
+        bw,
+        bh,
         None,
         None,
         Some(a.hinst),
@@ -470,7 +482,7 @@ unsafe fn show_bar() {
     )
     .expect("bar");
     a.bar = hwnd;
-    round_window(hwnd, BAR_W, BAR_H, 12);
+    round_window(hwnd, bw, bh, s(12));
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
 }
@@ -480,33 +492,38 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
+            let (bw, bh) = (bar_w(), bar_h());
             let full = RECT {
                 left: 0,
                 top: 0,
-                right: BAR_W,
-                bottom: BAR_H,
+                right: bw,
+                bottom: bh,
             };
             fill(hdc, &full, C_BG);
 
             let a = app();
-            // 开始按钮
+            let pad = s(6);
+            let start_r = s(96);
+            let mic_l = s(100);
+            let mic_r = s(196);
+            let close_l = s(200);
+
             let mut r = RECT {
-                left: 8,
-                top: 6,
-                right: 96,
-                bottom: BAR_H - 6,
+                left: s(8),
+                top: pad,
+                right: start_r,
+                bottom: bh - pad,
             };
             if a.bar_hover == 1 {
                 fill(hdc, &r, C_HOVER);
             }
             draw_label(hdc, "● 开始", &mut r, true, C_ACCENT);
 
-            // 麦克风
             let mut r = RECT {
-                left: 100,
-                top: 6,
-                right: 196,
-                bottom: BAR_H - 6,
+                left: mic_l,
+                top: pad,
+                right: mic_r,
+                bottom: bh - pad,
             };
             if a.bar_hover == 2 {
                 fill(hdc, &r, C_HOVER);
@@ -520,12 +537,11 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             };
             draw_label(hdc, mic_text, &mut r, false, C_MUTED);
 
-            // 关闭
             let mut r = RECT {
-                left: 200,
-                top: 6,
-                right: BAR_W - 8,
-                bottom: BAR_H - 6,
+                left: close_l,
+                top: pad,
+                right: bw - s(8),
+                bottom: bh - pad,
             };
             if a.bar_hover == 3 {
                 fill(hdc, &r, C_HOVER);
@@ -537,11 +553,11 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         WM_MOUSEMOVE => {
             let p = lparam_point(lp);
-            let zone = if (8..96).contains(&p.x) {
+            let zone = if (s(8)..s(96)).contains(&p.x) {
                 1
-            } else if (100..196).contains(&p.x) {
+            } else if (s(100)..s(196)).contains(&p.x) {
                 2
-            } else if (200..BAR_W - 8).contains(&p.x) {
+            } else if (s(200)..bar_w() - s(8)).contains(&p.x) {
                 3
             } else {
                 0
@@ -556,12 +572,12 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         WM_LBUTTONUP => {
             let p = lparam_point(lp);
             let a = app();
-            if (8..96).contains(&p.x) {
+            if (s(8)..s(96)).contains(&p.x) {
                 begin_record();
-            } else if (100..196).contains(&p.x) {
+            } else if (s(100)..s(196)).contains(&p.x) {
                 a.mic_on = !a.mic_on;
                 let _ = InvalidateRect(Some(hwnd), None, false);
-            } else if (200..BAR_W - 8).contains(&p.x) {
+            } else if (s(200)..bar_w() - s(8)).contains(&p.x) {
                 std::process::exit(0);
             }
             LRESULT(0)
@@ -590,7 +606,11 @@ unsafe fn begin_record() {
         .to_string_lossy()
         .to_string();
 
-    let audio_cfg = if a.mic_on { a.mic.map(|m| (m.sample_rate, m.channels)) } else { None };
+    let audio_cfg = if a.mic_on {
+        a.mic.map(|m| (m.sample_rate, m.channels))
+    } else {
+        None
+    };
     a.first_frame = Arc::new(AtomicBool::new(false));
 
     match rec::start(a.mon_index, crop, out.clone(), audio_cfg, a.first_frame.clone()) {
@@ -603,12 +623,7 @@ unsafe fn begin_record() {
             a.audio_stop = Arc::new(AtomicBool::new(false));
 
             if let Some(info) = a.mic.filter(|_| a.mic_on) {
-                let handle = audio::spawn(
-                    info,
-                    cb,
-                    a.first_frame.clone(),
-                    a.audio_stop.clone(),
-                );
+                let handle = audio::spawn(info, cb, a.first_frame.clone(), a.audio_stop.clone());
                 a.audio_thread = Some(handle);
             }
 
@@ -625,7 +640,7 @@ unsafe fn begin_record() {
 
 unsafe fn create_frame(sel: RECT) {
     let a = app();
-    let t = 3;
+    let t = s(3);
     let rects = [
         (sel.left - t, sel.top - t, sel.right - sel.left + t * 2, t),
         (sel.left - t, sel.bottom, sel.right - sel.left + t * 2, t),
@@ -648,7 +663,6 @@ unsafe fn create_frame(sel: RECT) {
             None,
         ) {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
             a.frames.push(hwnd);
         }
     }
@@ -656,11 +670,11 @@ unsafe fn create_frame(sel: RECT) {
 
 unsafe fn create_chip(sel: RECT) {
     let a = app();
-    let w = 208;
-    let h = 38;
-    let mut y = sel.top - h - 10;
+    let w = s(208);
+    let h = s(38);
+    let mut y = sel.top - h - s(10);
     if y < a.mon.top {
-        y = sel.bottom + 10;
+        y = sel.bottom + s(10);
     }
     let x = sel.left;
     if let Ok(hwnd) = CreateWindowExW(
@@ -678,9 +692,8 @@ unsafe fn create_chip(sel: RECT) {
         None,
     ) {
         a.chip = hwnd;
-        round_window(hwnd, w, h, 10);
+        round_window(hwnd, w, h, s(10));
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
         SetTimer(Some(hwnd), 1, 250, None);
     }
 }
@@ -728,27 +741,28 @@ unsafe extern "system" fn chip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
+            let (w, h) = (s(208), s(38));
             let full = RECT {
                 left: 0,
                 top: 0,
-                right: 208,
-                bottom: 38,
+                right: w,
+                bottom: h,
             };
             fill(hdc, &full, C_BG);
             let a = app();
             let secs = a.started_at.elapsed().as_secs();
             let mut r = RECT {
-                left: 10,
+                left: s(10),
                 top: 0,
-                right: 96,
-                bottom: 38,
+                right: s(96),
+                bottom: h,
             };
             draw_label(hdc, &format!("● {}", util::mmss(secs)), &mut r, true, C_ACCENT);
             let mut r = RECT {
-                left: 96,
+                left: s(96),
                 top: 0,
-                right: 200,
-                bottom: 38,
+                right: w - s(8),
+                bottom: h,
             };
             draw_label(hdc, "F9 停止", &mut r, false, C_MUTED);
             let _ = EndPaint(hwnd, &ps);
@@ -789,10 +803,10 @@ unsafe extern "system" fn frame_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 
 unsafe fn show_toast(text: &str) {
     let a = app();
-    let w = 460;
-    let h = 64;
+    let w = s(460);
+    let h = s(64);
     let x = a.mon.left + (a.mon.right - a.mon.left - w) / 2;
-    let y = a.mon.bottom - 160;
+    let y = a.mon.bottom - s(160);
     if let Ok(hwnd) = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLS_TOAST,
@@ -808,11 +822,9 @@ unsafe fn show_toast(text: &str) {
         None,
     ) {
         a.toast = hwnd;
-        unsafe {
-            let ptr = Box::into_raw(Box::new(util::wide(text)));
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
-        }
-        round_window(hwnd, w, h, 14);
+        let ptr = Box::into_raw(Box::new(util::wide(text)));
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+        round_window(hwnd, w, h, s(14));
         let _ = ShowWindow(hwnd, SW_SHOW);
         SetTimer(Some(hwnd), 2, 2600, None);
     }
@@ -823,11 +835,12 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
+            let (w, h) = (s(460), s(64));
             let full = RECT {
                 left: 0,
                 top: 0,
-                right: 460,
-                bottom: 64,
+                right: w,
+                bottom: h,
             };
             fill(hdc, &full, C_BG);
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Vec<u16>;
@@ -838,10 +851,10 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, C_TEXT);
                 let mut r = RECT {
-                    left: 16,
+                    left: s(16),
                     top: 0,
-                    right: 444,
-                    bottom: 64,
+                    right: w - s(16),
+                    bottom: h,
                 };
                 DrawTextW(hdc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
                 SelectObject(hdc, old);
