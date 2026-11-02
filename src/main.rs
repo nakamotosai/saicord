@@ -593,7 +593,12 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     let stop_label = util::wide(&format!("停止录制\t{}", a.cfg.stop_hotkey));
     let cfg_label = util::wide("打开配置文件");
     let quit_label = util::wide("退出");
-    let fps_label = util::wide(&format!("帧率 {} fps（点击切换）", a.cfg.fps));
+    let tier = match a.cfg.fps {
+        0..=45 => "低",
+        46..=90 => "中",
+        _ => "高",
+    };
+    let fps_label = util::wide(&format!("帧率：{} {} fps（点击切换）", tier, a.cfg.fps));
 
     if recording {
         let _ = AppendMenuW(menu, MF_STRING, MENU_STOP, PCWSTR(stop_label.as_ptr()));
@@ -620,12 +625,17 @@ unsafe fn show_tray_menu(hwnd: HWND) {
         MENU_FPS => {
             let a = app();
             a.cfg.fps = match a.cfg.fps {
-                30 => 60,
-                60 => 120,
+                ..=45 => 60,
+                46..=90 => 120,
                 _ => 30,
             };
             config::save(&a.cfg);
-            show_toast(&format!("帧率改为 {} fps（下次录制生效）", a.cfg.fps));
+            let tier = match a.cfg.fps {
+                ..=45 => "低",
+                46..=90 => "中",
+                _ => "高",
+            };
+            show_toast(&format!("帧率：{} {} fps（下次录制生效）", tier, a.cfg.fps));
         }
         MENU_CONFIG => open_config(),
         MENU_QUIT => quit_app(),
