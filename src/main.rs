@@ -428,9 +428,15 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 .unwrap_or(false);
             if ok {
                 let _ = ShowWindow(hwnd, SW_HIDE);
+                if let Some(sel) = a.sel {
+                    // 框选完成立刻立起边框，之后一直留着，直到录制结束
+                    destroy_frames();
+                    create_frame(sel);
+                }
                 show_bar();
             } else {
                 a.sel = None;
+                destroy_frames();
                 paint_overlay();
             }
             LRESULT(0)
@@ -627,7 +633,9 @@ unsafe fn begin_record() {
                 a.audio_thread = Some(handle);
             }
 
-            create_frame(sel);
+            if a.frames.is_empty() {
+                create_frame(sel);
+            }
             create_chip(sel);
             let _ = RegisterHotKey(Some(a.chip), 1, MOD_NOREPEAT, VK_F9.0 as u32);
         }
@@ -635,6 +643,13 @@ unsafe fn begin_record() {
             log(&format!("rec start failed: {e}"));
             show_toast(&format!("启动录制失败：{e}"));
         }
+    }
+}
+
+unsafe fn destroy_frames() {
+    let a = app();
+    for hwnd in a.frames.drain(..) {
+        let _ = DestroyWindow(hwnd);
     }
 }
 
@@ -720,9 +735,7 @@ unsafe fn stop_record() {
         }
     }
 
-    for hwnd in a.frames.drain(..) {
-        let _ = DestroyWindow(hwnd);
-    }
+    destroy_frames();
     if a.chip != HWND::default() {
         let _ = DestroyWindow(a.chip);
         a.chip = HWND::default();
