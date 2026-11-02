@@ -299,7 +299,9 @@ unsafe fn create_tray() {
         hIcon: a.hicon,
         ..Default::default()
     };
-    let tip: Vec<u16> = "saicord · 框选即录".encode_utf16().collect();
+    let tip: Vec<u16> = format!("saicord · {} 框选 / {} 停止", a.cfg.start_hotkey, a.cfg.stop_hotkey)
+        .encode_utf16()
+        .collect();
     let n = tip.len().min(nid.szTip.len() - 1);
     nid.szTip[..n].copy_from_slice(&tip[..n]);
     if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
@@ -329,8 +331,8 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     let a = app();
     let Ok(menu) = CreatePopupMenu() else { return };
     let recording = a.recording;
-    let start_label = util::wide("开始录制");
-    let stop_label = util::wide("停止录制");
+    let start_label = util::wide(&format!("开始录制\t{}", a.cfg.start_hotkey));
+    let stop_label = util::wide(&format!("停止录制\t{}", a.cfg.stop_hotkey));
     let cfg_label = util::wide("打开配置文件");
     let quit_label = util::wide("退出");
 
