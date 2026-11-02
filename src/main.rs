@@ -42,6 +42,8 @@ const C_HOVER: COLORREF = rgb(0x2E, 0x2E, 0x32);
 
 struct Dib {
     hdc: HDC,
+    bmp: HBITMAP,
+    old: HGDIOBJ,
     ptr: *mut u32,
     w: i32,
     h: i32,
@@ -245,11 +247,13 @@ unsafe fn open_overlay() {
     };
     let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
     let bmp = CreateDIBSection(Some(mem), &bmi, DIB_RGB_COLORS, &mut ptr, None, 0).expect("dib");
-    let _ = SelectObject(mem, HGDIOBJ(bmp.0));
+    let old = SelectObject(mem, HGDIOBJ(bmp.0));
     ReleaseDC(None, screen);
 
     a.dib = Some(Dib {
         hdc: mem,
+        bmp,
+        old,
         ptr: ptr as *mut u32,
         w,
         h,
@@ -281,6 +285,16 @@ unsafe fn open_overlay() {
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
     let _ = SetFocus(Some(hwnd));
+}
+
+/// 选完就把遮罩位图还掉：4K 屏上它一个人就占 31.6 MB，录屏阶段用不上。
+unsafe fn free_dib() {
+    let a = app();
+    if let Some(dib) = a.dib.take() {
+        let _ = SelectObject(dib.hdc, dib.old);
+        let _ = DeleteObject(HGDIOBJ(dib.bmp.0));
+        let _ = DeleteDC(dib.hdc);
+    }
 }
 
 unsafe fn paint_overlay() {
@@ -433,6 +447,7 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                     destroy_frames();
                     create_frame(sel);
                 }
+                free_dib();
                 show_bar();
             } else {
                 a.sel = None;
