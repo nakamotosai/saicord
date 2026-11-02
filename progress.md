@@ -68,3 +68,10 @@
 - 录制完不再退出，回托盘待命；Esc/右键/✕ 都是取消回托盘
 - 事故与补救：测试脚本 `ls -t 桌面/*.mp4 | head -1` 误删了用户桌面上的 `YuudachiDisco_MV_1080x1920.mp4`（94 MB）；已用 `F:\projects\mv-studio\out\yuudachi-disco.mp4` 母版重编码还原（1080×1920 / 30fps / 224.939s / AAC 317k 直拷 / 88.4 MB）；测试脚本已改为只匹配 `录屏_*.mp4`
 - 环境观察：某次启动 `GetDefaultAudioEndpoint` 报「找不到元素」，已加开录前二次探测兜底
+
+## 2026-11-02 · v0.3.1 默认键改 F8 + 桌面快捷方式 + 图标
+
+- 用户要求避开常用键：`start_hotkey = F8`、`stop_hotkey = F9`，配置文件和默认值同步改
+- 生成 `assets/saicord.ico`（深底圆角 + 琥珀环 + 白点，256→16 六档），build.rs + winresource 嵌进 exe
+- 桌面快捷方式 `saicord 录屏.lnk` → `F:\tools\saicord\saicord.exe`
+- 验证：F8 唤起后 EnumWindows 出现 `SaicordOverlay visible=True`，Esc 后消失

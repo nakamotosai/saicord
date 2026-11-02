@@ -15,7 +15,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            start_hotkey: "Ctrl+Alt+R".into(),
+            start_hotkey: "F8".into(),
             stop_hotkey: "F9".into(),
         }
     }
@@ -64,7 +64,7 @@ pub fn save(cfg: &Config) {
     }
     let body = format!(
         "# saicord 配置（改完重启生效）\n\
-         # 键名写法：Ctrl / Alt / Shift / Win 用 + 连接，例如 Ctrl+Alt+R、F9、Shift+F8\n\
+         # 键名写法：Ctrl / Alt / Shift / Win 用 + 连接，例如 F8、F9、Shift+F8\n\
          start_hotkey = {}\n\
          stop_hotkey  = {}\n",
         cfg.start_hotkey, cfg.stop_hotkey

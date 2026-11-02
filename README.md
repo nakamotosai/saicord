@@ -5,7 +5,7 @@
 没有编辑器、没有设备选择、没有设置页、没有开机自启。双击就跑，F9 停，视频已经在桌面上了。
 
 ```
-双击 saicord.exe（或按 Ctrl+Alt+R）
+双击 saicord.exe（或按 F8）
   └─ 拖出要录的矩形
        └─ 点「● 开始」
             └─ F9 停止
@@ -36,11 +36,11 @@ Esc / 右键 = 取消框选，回托盘。
 
 ```
 # 键名写法：Ctrl / Alt / Shift / Win 用 + 连接
-start_hotkey = Ctrl+Alt+R
+start_hotkey = F8
 stop_hotkey  = F9
 ```
 
-支持 `Ctrl+Alt+R`、`Shift+F8`、`F9`、单字母等。工具条上的提示会跟着变。
+支持 `F8`、`F9`、`Shift+F8`、`Ctrl+Alt+R`、单字母等。工具条上的提示会跟着变。
 
 单实例：再双击一次 exe 不会起第二个进程，而是把托盘里的那个叫出来开始框选。
 
