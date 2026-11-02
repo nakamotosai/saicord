@@ -20,11 +20,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const CLS_OVERLAY: PCWSTR = w!("DogscRsOverlay");
-const CLS_BAR: PCWSTR = w!("DogscRsBar");
-const CLS_CHIP: PCWSTR = w!("DogscRsChip");
-const CLS_FRAME: PCWSTR = w!("DogscRsFrame");
-const CLS_TOAST: PCWSTR = w!("DogscRsToast");
+const CLS_OVERLAY: PCWSTR = w!("SaicordOverlay");
+const CLS_BAR: PCWSTR = w!("SaicordBar");
+const CLS_CHIP: PCWSTR = w!("SaicordChip");
+const CLS_FRAME: PCWSTR = w!("SaicordFrame");
+const CLS_TOAST: PCWSTR = w!("SaicordToast");
 
 /// 未选中区域：半透明黑（0xAARRGGBB）
 const DIM: u32 = 0x6600_0000;
@@ -99,7 +99,7 @@ pub fn log(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(r"F:\tmp\dogsc-rs.log")
+        .open(r"F:\tmp\saicord.log")
     {
         let _ = writeln!(f, "{msg}");
     }

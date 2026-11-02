@@ -216,16 +216,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
 
 [[package]]
-name = "dogsc-rs"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "parking_lot",
- "windows 0.62.2",
- "windows-capture",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -667,6 +657,16 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "saicord"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "parking_lot",
+ "windows 0.62.2",
+ "windows-capture",
+]
 
 [[package]]
 name = "same-file"

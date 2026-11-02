@@ -1,0 +1,26 @@
+{
+  "name": "saicord",
+  "theme": "dark-utility",
+  "bg": ["#1C1C1E"],
+  "hover": ["#2E2E32"],
+  "ink": ["#FFFFFF", "#9A9AA0"],
+  "accents": ["#FF9A4D"],
+  "borders": ["#FF9A4D"],
+  "overlay": "rgba(0,0,0,0.40)",
+  "fonts": ["Microsoft YaHei UI"],
+  "type_scale_px": [15],
+  "weights": [400, 600],
+  "radius": 12,
+  "control_height_px": 48,
+  "min_hit_px": 44,
+  "frame_thickness_px": 3,
+  "scaling": "all metrics multiplied by GetDpiForWindow/96",
+  "assertions": [
+    "200% DPI 下工具条高度 = 96 物理像素、字号 = 30 物理像素",
+    "所有可点区域 >= 44x44 逻辑像素",
+    "正文 #FFFFFF on #1C1C1E 对比度 >= 15:1；次要文字 #9A9AA0 >= 6.5:1",
+    "禁止红色系（#FF0000/#FF453A）作为大面积填充；录制指示用琥珀 #FF9A4D",
+    "录制边框与计时条必须位于选区之外，视频抽帧琥珀色像素 = 0"
+  ],
+  "updated": "2026-11-02"
+}

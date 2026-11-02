@@ -1,43 +1,69 @@
-# dogsc-rs
+# saicord
 
-极简区域录屏。**框选 → 开始 → 自动出片到桌面**，没有编辑器、没有设备选择、没有设置页。
+**框选 → 开始 → 自动出片到桌面。** Windows 上的极简区域录屏，Rust 原生实现。
 
-## 用法
+没有编辑器、没有设备选择、没有设置页、没有开机自启。双击就跑，F9 停，视频已经在桌面上了。
 
-1. 双击 `dogsc-rs.exe`（或开始菜单 **DogSC-RS**）
-2. 在屏幕上拖出要录的区域（Esc / 右键取消）
-3. 点「● 开始」开录；麦克风可随时开关
-4. **F9** 停止（或点计时条）
-5. 视频自动保存到 `桌面\录屏_YYYYMMDD_HHMMSS.mp4`
+```
+双击 saicord.exe
+  └─ 拖出要录的矩形
+       └─ 点「● 开始」
+            └─ F9 停止
+                 └─ 桌面\录屏_20261102_104139.mp4
+```
 
-## 实现
+## 为什么又一个录屏工具
 
-| 环节 | 用的东西 |
+因为现成的太重。同类 Electron 方案常驻 6 个进程、674 MB 内存；saicord 是单个 551 KB 的可执行文件，空闲 48 MB，录制中约 150 MB。功能砍到只剩一条链路：**抓屏 → 编码 → 落盘**。
+
+## 功能
+
+- 拖拽框选任意矩形区域，实时显示尺寸
+- 录制期间**选区边框常亮**（画在选区外侧，不会进画面）
+- 麦克风开关，录音与画面同步起算
+- F9 或点计时条停止，自动保存到桌面
+- 按显示器 DPI 缩放整套界面（200% 下按钮不会变小）
+- Esc / 右键随时取消
+
+## 技术栈
+
+| 环节 | 实现 |
 |---|---|
-| 抓屏 | Windows Graphics Capture（D3D11 侧裁切，只回读选区） |
-| 编码 | Media Foundation 硬件 H.264 + AAC，MP4 |
-| 音频 | cpal 采默认麦克风，PCM 直接喂编码器 |
+| 抓屏 | Windows Graphics Capture（D3D11 侧 `CopySubresourceRegion` 裁切，只回读选区） |
+| 编码 | Media Foundation 硬件 H.264 + AAC，MP4 封装 |
+| 音频 | cpal 采默认麦克风，16-bit PCM 直接送编码器 |
 | 选区遮罩 | 分层窗口 + per-pixel alpha（`UpdateLayeredWindow`） |
-| 录制边框 | 画在选区**外侧**，所以永远不会进画面 |
+| 界面 | 原生 Win32，无 GUI 框架 |
 
-实测：600×400 / 30fps / 3s ≈ 90 帧，空闲 48 MB，录制中约 150 MB。
+零第三方运行时依赖，不打包 ffmpeg，不需要 Node。
 
 ## 构建
 
 ```bash
 cargo build --release
-# 产物 target/release/dogsc-rs.exe
+# target/release/saicord.exe
 ```
 
-依赖 Rust 1.85+（`windows-capture` 用 edition 2024）与 MSVC 工具链。
+需要 Rust 1.85+（依赖 `windows-capture` 使用 edition 2024）和 MSVC 工具链。
 
 ## 已知限制
 
-- 只支持光标所在的那块显示器；多屏跨屏框选不支持
-- 选区最小 32×32（逻辑像素）
-- 系统声音（扬声器）不录，只录麦克风
-- 停止只认 F9 / 点计时条；没有托盘、没有开机自启
+- 只覆盖光标所在的显示器；跨屏框选不支持
+- 选区最小 32×32 逻辑像素
+- 只录麦克风，不录系统声音
+- 停止只认 F9 / 点击计时条；无托盘常驻
+
+## Roadmap
+
+- [ ] 系统声音（WASAPI loopback）
+- [ ] 多显示器 / 跨屏选区
+- [ ] 可配置热键与保存目录
+- [ ] 录制后托盘提示与「打开所在文件夹」
+
+## English
+
+Minimal region screen recorder for Windows. Drag a rectangle, press start, press F9, get an MP4 on your Desktop. Built in Rust on Windows Graphics Capture + Media Foundation — no Electron, no ffmpeg, no editor UI.
 
 ## 许可
 
-MIT。抓屏库 `windows-capture` 为 MIT；界面与交互参考 DogSC（laogou717, MIT）的产品思路，代码为独立 Rust 实现。
+MIT
