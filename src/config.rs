@@ -12,6 +12,8 @@ pub struct Config {
     pub stop_hotkey: String,
     /// 录制帧率档位：低 30 / 中 60 / 高 120
     pub fps: u32,
+    /// 启动时检查新版本
+    pub update_check: bool,
 }
 
 impl Default for Config {
@@ -20,6 +22,7 @@ impl Default for Config {
             start_hotkey: "F8".into(),
             stop_hotkey: "F9".into(),
             fps: 120,
+            update_check: true,
         }
     }
 }
@@ -54,6 +57,10 @@ pub fn load() -> Config {
         match k.as_str() {
             "start_hotkey" => cfg.start_hotkey = v,
             "stop_hotkey" => cfg.stop_hotkey = v,
+            "update_check" => {
+                let v = v.to_ascii_lowercase();
+                cfg.update_check = !matches!(v.as_str(), "off" | "false" | "0" | "no");
+            }
             "fps" => {
                 if let Ok(n) = v.parse::<u32>() {
                     cfg.fps = n.clamp(15, 144);
@@ -75,9 +82,14 @@ pub fn save(cfg: &Config) {
          # 键名写法：Ctrl / Alt / Shift / Win 用 + 连接，例如 F8、F9、Shift+F8\n\
          # 帧率三档：30=低 / 60=中 / 120=高（越高越丝滑、文件越大）\n\
          fps          = {}\n\
+         # 启动时检查新版本：on / off\n\
+         update_check = {}\n\
          start_hotkey = {}\n\
          stop_hotkey  = {}\n",
-        cfg.fps, cfg.start_hotkey, cfg.stop_hotkey
+        cfg.fps,
+        if cfg.update_check { "on" } else { "off" },
+        cfg.start_hotkey,
+        cfg.stop_hotkey
     );
     let _ = std::fs::write(p, body);
 }

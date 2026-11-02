@@ -3,6 +3,7 @@
 mod audio;
 mod config;
 mod rec;
+mod update;
 mod util;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,8 +22,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, SetFocus, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, ShellExecuteW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NOTIFYICONDATAW,
+    Shell_NotifyIconW, ShellExecuteW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -35,8 +36,14 @@ const CLS_TRAY: PCWSTR = w!("SaicordTray");
 
 const WM_APP_START: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
+const WM_APP_UPDATE: u32 = WM_APP + 3;
+const WM_APP_UPGRADE_DONE: u32 = WM_APP + 4;
 
 static TRAY_ONLY: AtomicBool = AtomicBool::new(false);
+/// 有新版本时:(tag, 下载地址)
+static UPDATE_READY: parking_lot::Mutex<Option<(String, String)>> = parking_lot::Mutex::new(None);
+/// 升级失败的说明
+static UPDATE_ERR: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
 
 const HOTKEY_START: i32 = 1;
 const HOTKEY_STOP: i32 = 2;
@@ -46,6 +53,8 @@ const MENU_STOP: usize = 2;
 const MENU_CONFIG: usize = 3;
 const MENU_QUIT: usize = 4;
 const MENU_FPS: usize = 5;
+const MENU_UPGRADE: usize = 6;
+const MENU_CHECK: usize = 7;
 
 /// 未选中区域：半透明黑（0xAARRGGBB）
 const DIM: u32 = 0x6600_0000;
@@ -367,6 +376,38 @@ fn test_mode(args: &[String]) {
                 }
             }
         }
+        "update" => {
+            // 只查不动：--test update
+            match update::latest() {
+                Ok(rel) => log(&format!(
+                    "update check: latest={} current={} newer={} asset={}",
+                    rel.tag,
+                    update::CURRENT,
+                    update::is_newer(&rel.tag, update::CURRENT),
+                    rel.url
+                )),
+                Err(e) => log(&format!("update check failed: {e}")),
+            }
+        }
+        "update-apply" => {
+            // 真升级：下载 → 替换自己
+            match update::latest() {
+                Ok(rel) if update::is_newer(&rel.tag, update::CURRENT) => {
+                    match update::download(&rel.url, &rel.tag) {
+                        Ok(path) => {
+                            let cur = std::env::current_exe().unwrap_or_default();
+                            match update::apply(&path, &cur) {
+                                Ok(()) => log(&format!("update apply ok: {} -> {}", rel.tag, cur.display())),
+                                Err(e) => log(&format!("update apply failed: {e}")),
+                            }
+                        }
+                        Err(e) => log(&format!("update download failed: {e}")),
+                    }
+                }
+                Ok(rel) => log(&format!("update apply: 已是最新 {}", rel.tag)),
+                Err(e) => log(&format!("update check failed: {e}")),
+            }
+        }
         other => log(&format!("test: unknown mode {other}")),
     }
 }
@@ -437,6 +478,11 @@ fn main() {
         register_classes(app().hinst);
         create_tray();
         register_hotkeys();
+        let cur = std::env::current_exe().unwrap_or_default();
+        update::cleanup_old(&cur);
+        if app().cfg.update_check {
+            spawn_update_check(6);
+        }
         if !TRAY_ONLY.load(Ordering::Relaxed) {
             start_selection();
         }
@@ -563,6 +609,96 @@ unsafe fn create_tray() {
     }
 }
 
+unsafe fn notify_balloon(title: &str, text: &str) {
+    let a = app();
+    if a.tray == HWND::default() {
+        return;
+    }
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: a.tray,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_INFO,
+        hIcon: a.hicon,
+        dwInfoFlags: NIIF_INFO,
+        ..Default::default()
+    };
+    let t: Vec<u16> = title.encode_utf16().collect();
+    let n = t.len().min(nid.szInfoTitle.len() - 1);
+    nid.szInfoTitle[..n].copy_from_slice(&t[..n]);
+    let b: Vec<u16> = text.encode_utf16().collect();
+    let n = b.len().min(nid.szInfo.len() - 1);
+    nid.szInfo[..n].copy_from_slice(&b[..n]);
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/// 后台线程:查版本 → 通知 UI
+fn spawn_update_check(delay_secs: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(delay_secs));
+        loop {
+            match update::latest() {
+                Ok(rel) => {
+                    if update::is_newer(&rel.tag, update::CURRENT) {
+                        log(&format!("update: {} 可用({})", rel.tag, update::CURRENT));
+                        *UPDATE_READY.lock() = Some((rel.tag.clone(), rel.url.clone()));
+                        unsafe {
+                            let a = app();
+                            if a.tray != HWND::default() {
+                                let _ = PostMessageW(Some(a.tray), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
+                            }
+                        }
+                    } else {
+                        log(&format!("update: 已是最新 {}", update::CURRENT));
+                    }
+                }
+                Err(e) => log(&format!("update: 检查失败 {e}")),
+            }
+            std::thread::sleep(Duration::from_secs(6 * 3600));
+        }
+    });
+}
+
+/// 后台线程:下载 → 替换自身 → 让 UI 重启
+fn spawn_upgrade() {
+    std::thread::spawn(move || {
+        let (tag, url) = match UPDATE_READY.lock().clone() {
+            Some(v) => v,
+            None => return,
+        };
+        let ok = match update::download(&url, &tag) {
+            Ok(path) => {
+                log(&format!("update: 下载完成 {}", path.display()));
+                let cur = std::env::current_exe().unwrap_or_default();
+                match update::apply(&path, &cur) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        *UPDATE_ERR.lock() = Some(e.clone());
+                        log(&format!("update: 替换失败 {e}"));
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                *UPDATE_ERR.lock() = Some(e.clone());
+                log(&format!("update: 下载失败 {e}"));
+                false
+            }
+        };
+        unsafe {
+            let a = app();
+            if a.tray != HWND::default() {
+                let _ = PostMessageW(
+                    Some(a.tray),
+                    WM_APP_UPGRADE_DONE,
+                    WPARAM(if ok { 1 } else { 0 }),
+                    LPARAM(0),
+                );
+            }
+        }
+    });
+}
+
 unsafe fn register_hotkeys() {
     let a = app();
     if let Some((mods, vk)) = config::parse_hotkey(&a.cfg.start_hotkey) {
@@ -609,6 +745,16 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     if !recording {
         let _ = AppendMenuW(menu, MF_STRING, MENU_FPS, PCWSTR(fps_label.as_ptr()));
     }
+    let pending = UPDATE_READY.lock().clone();
+    let up_text = match &pending {
+        Some((tag, _)) => format!("升级到 {}（自动下载安装）", tag),
+        None => "检查更新".to_string(),
+    };
+    let up_label = util::wide(&up_text);
+    if !recording {
+        let id = if pending.is_some() { MENU_UPGRADE } else { MENU_CHECK };
+        let _ = AppendMenuW(menu, MF_STRING, id, PCWSTR(up_label.as_ptr()));
+    }
     let _ = AppendMenuW(menu, MF_STRING, MENU_CONFIG, PCWSTR(cfg_label.as_ptr()));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, PCWSTR(quit_label.as_ptr()));
@@ -636,6 +782,26 @@ unsafe fn show_tray_menu(hwnd: HWND) {
                 _ => "高",
             };
             show_toast(&format!("帧率：{} {} fps（下次录制生效）", tier, a.cfg.fps));
+        }
+        MENU_UPGRADE => {
+            show_toast("正在下载新版本…");
+            spawn_upgrade();
+        }
+        MENU_CHECK => {
+            show_toast("正在检查更新…");
+            std::thread::spawn(|| {
+                match update::latest() {
+                    Ok(rel) if update::is_newer(&rel.tag, update::CURRENT) => {
+                        *UPDATE_READY.lock() = Some((rel.tag.clone(), rel.url.clone()));
+                        unsafe {
+                            let a = app();
+                            let _ = PostMessageW(Some(a.tray), WM_APP_UPDATE, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                    Ok(_) => unsafe { show_toast(&format!("已是最新版本 {}", update::CURRENT)) },
+                    Err(e) => unsafe { show_toast(&format!("检查失败：{e}")) },
+                }
+            });
         }
         MENU_CONFIG => open_config(),
         MENU_QUIT => quit_app(),
@@ -698,6 +864,32 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 HOTKEY_START => start_selection(),
                 HOTKEY_STOP => stop_record(),
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_APP_UPDATE => {
+            let tag = UPDATE_READY
+                .lock()
+                .as_ref()
+                .map(|(t, _)| t.clone())
+                .unwrap_or_default();
+            notify_balloon(
+                &format!("saicord {} 可用", tag),
+                "在托盘图标上右键，点「升级」就会自动下载并重启。",
+            );
+            show_toast(&format!("新版本 {}：右键托盘图标选「升级」", tag));
+            LRESULT(0)
+        }
+        WM_APP_UPGRADE_DONE => {
+            if wp.0 == 1 {
+                show_toast("升级完成，正在重启…");
+                let cur = std::env::current_exe().unwrap_or_default();
+                let _ = std::process::Command::new(&cur).arg("--tray").spawn();
+                std::thread::sleep(Duration::from_millis(400));
+                quit_app();
+            } else {
+                let e = UPDATE_ERR.lock().clone().unwrap_or_else(|| "未知错误".into());
+                show_toast(&format!("升级失败：{e}"));
             }
             LRESULT(0)
         }
