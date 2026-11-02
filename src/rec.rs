@@ -28,6 +28,7 @@ pub struct Flags {
     pub out: String,
     /// Some((采样率, 声道数)) 表示要录麦克风
     pub audio: Option<(u32, u16)>,
+    pub fps: u32,
     pub started: Arc<AtomicBool>,
     /// 已送达编码器的帧数（诊断用）
     pub frames: Arc<AtomicU64>,
@@ -39,6 +40,10 @@ pub struct Recorder {
     buf: Vec<u8>,
     started: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
+    /// 上一帧送编码器的时间戳（100ns）；-1 = 还没送过
+    last_ts: i64,
+    /// 目标帧间隔（100ns）
+    period: i64,
 }
 
 impl Recorder {
@@ -58,10 +63,17 @@ impl GraphicsCaptureApiHandler for Recorder {
         let w = x1.saturating_sub(x0).max(2);
         let h = y1.saturating_sub(y0).max(2);
 
-        let bitrate = if w * h > 1920 * 1080 { 16_000_000 } else { 8_000_000 };
+        // 码率分档：30fps 1080p=8M / 4K=16M；60fps 1.5 倍；120fps 2 倍
+        let base = if w * h > 1920 * 1080 { 16_000_000u64 } else { 8_000_000u64 };
+        let scale = match ctx.flags.fps {
+            0..=30 => 10,
+            31..=60 => 15,
+            _ => 20,
+        };
+        let bitrate = (base * scale / 10).min(48_000_000) as u32;
         let video = VideoSettingsBuilder::new(w, h)
             .sub_type(VideoSettingsSubType::H264)
-            .frame_rate(30)
+            .frame_rate(ctx.flags.fps)
             .bitrate(bitrate);
 
         let audio = match ctx.flags.audio {
@@ -91,6 +103,8 @@ impl GraphicsCaptureApiHandler for Recorder {
             buf: Vec::new(),
             started: ctx.flags.started,
             frames: ctx.flags.frames,
+            last_ts: -1,
+            period: (10_000_000 / ctx.flags.fps.max(1) as i64).max(1),
         })
     }
 
@@ -100,6 +114,12 @@ impl GraphicsCaptureApiHandler for Recorder {
         _control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let ts = frame.timestamp()?.Duration;
+        // 送帧门限：目标间隔的 45%。WGC 按显示器刷新出帧（143Hz），
+        // 全部回读太浪费；放行略快于目标，让编码器自己挑最接近 1/fps 的那帧。
+        if self.last_ts >= 0 && ts - self.last_ts < self.period * 45 / 100 {
+            return Ok(());
+        }
+        self.last_ts = ts;
         let (x0, y0, x1, y1) = self.crop;
 
         let mut fb = frame.buffer_crop(x0, y0, x1, y1)?;
@@ -133,6 +153,7 @@ pub fn start(
     crop: (u32, u32, u32, u32),
     out: String,
     audio: Option<(u32, u16)>,
+    fps: u32,
     started: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
 ) -> Result<Control, RecError> {
@@ -144,13 +165,14 @@ pub fn start(
         CursorCaptureSettings::WithCursor,
         DrawBorderSettings::WithoutBorder,
         SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Custom(Duration::from_millis(33)),
+        MinimumUpdateIntervalSettings::Custom(Duration::ZERO),
         DirtyRegionSettings::Default,
         ColorFormat::Bgra8,
         Flags {
             crop,
             out,
             audio,
+            fps,
             started,
             frames,
         },

@@ -10,6 +10,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 pub struct Config {
     pub start_hotkey: String,
     pub stop_hotkey: String,
+    /// 录制帧率：24 / 30 / 60 / 90 / 120
+    pub fps: u32,
 }
 
 impl Default for Config {
@@ -17,6 +19,7 @@ impl Default for Config {
         Self {
             start_hotkey: "F8".into(),
             stop_hotkey: "F9".into(),
+            fps: 60,
         }
     }
 }
@@ -51,6 +54,11 @@ pub fn load() -> Config {
         match k.as_str() {
             "start_hotkey" => cfg.start_hotkey = v,
             "stop_hotkey" => cfg.stop_hotkey = v,
+            "fps" => {
+                if let Ok(n) = v.parse::<u32>() {
+                    cfg.fps = n.clamp(15, 144);
+                }
+            }
             _ => {}
         }
     }
@@ -65,9 +73,11 @@ pub fn save(cfg: &Config) {
     let body = format!(
         "# saicord 配置（改完重启生效）\n\
          # 键名写法：Ctrl / Alt / Shift / Win 用 + 连接，例如 F8、F9、Shift+F8\n\
+         # 帧率：24 / 30 / 60 / 90 / 120，越高越丝滑、文件越大\n\
+         fps          = {}\n\
          start_hotkey = {}\n\
          stop_hotkey  = {}\n",
-        cfg.start_hotkey, cfg.stop_hotkey
+        cfg.fps, cfg.start_hotkey, cfg.stop_hotkey
     );
     let _ = std::fs::write(p, body);
 }
