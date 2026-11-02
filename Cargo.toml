@@ -1,0 +1,27 @@
+[package]
+name = "dogsc-rs"
+version = "0.1.0"
+edition = "2021"
+description = "极简区域录屏：框选 → 开始 → 自动出片"
+license = "MIT"
+
+[dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+] }
+windows-capture = "2.0.1"
+cpal = "0.15"
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
