@@ -104,3 +104,5 @@
 - 启动 6s 后查一次、之后每 6h；有新版本 → 托盘气泡 + 屏幕 toast + 菜单项「升级到 vX.Y.Z」
 - 升级：下载（校验 MZ 头、≥256KB）→ 当前 exe 改名 .old → 复制新 exe 就位 → 起新进程 → 退出；启动时清 .old
 - 实测：造 v9.9.9 测试 release → 检测 newer=true → 下载替换成功（F:/tmp 副本自替换，881,664 字节）→ 装回 v0.6.0 后报「已是最新 0.6.0」；测试 release 已删
+- 踩坑两条：1) 早先想用 `cmd /c timeout & start` 延迟重启，引号被 cmd 解析坏（命令行里出现字面量 `\"`）；2) 直接用 `Command::new(exe)` 立刻起新进程，会撞上单实例互斥被判成第二实例→退出。终解：新进程带 `--wait-for <pid>`，先 OpenProcess+WaitForSingleObject 等旧进程退出再抢锁
+- 端到端实测：装 v0.6.0 → 造 v9.9.9 release → `--upgrade` → 下载替换 → 新进程等 0.21s → 正常启动（mutex lasterr=0）→ .old 自动清掉 → 只剩一个进程；测试 release 已删
