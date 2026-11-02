@@ -1,6 +1,6 @@
 [package]
 name = "saicord"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "极简区域录屏：框选 → 开始 → 自动出片到桌面"
 license = "MIT"
@@ -13,6 +13,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Security",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
     "Win32_Media_Audio",

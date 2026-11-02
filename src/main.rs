@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod config;
 mod rec;
 mod util;
 
@@ -12,11 +13,16 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, SetFocus, UnregisterHotKey, MOD_NOREPEAT, VK_F9,
+    RegisterHotKey, SetFocus, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
+};
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, ShellExecuteW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -25,6 +31,18 @@ const CLS_BAR: PCWSTR = w!("SaicordBar");
 const CLS_CHIP: PCWSTR = w!("SaicordChip");
 const CLS_FRAME: PCWSTR = w!("SaicordFrame");
 const CLS_TOAST: PCWSTR = w!("SaicordToast");
+const CLS_TRAY: PCWSTR = w!("SaicordTray");
+
+const WM_APP_START: u32 = WM_APP + 1;
+const WM_APP_TRAY: u32 = WM_APP + 2;
+
+const HOTKEY_START: i32 = 1;
+const HOTKEY_STOP: i32 = 2;
+
+const MENU_START: usize = 1;
+const MENU_STOP: usize = 2;
+const MENU_CONFIG: usize = 3;
+const MENU_QUIT: usize = 4;
 
 /// 未选中区域：半透明黑（0xAARRGGBB）
 const DIM: u32 = 0x6600_0000;
@@ -51,6 +69,9 @@ struct Dib {
 
 struct App {
     hinst: HINSTANCE,
+    tray: HWND,
+    hicon: HICON,
+    cfg: config::Config,
     overlay: HWND,
     bar: HWND,
     chip: HWND,
@@ -67,6 +88,7 @@ struct App {
     audio_on: bool,
     audio_dev: Option<audio::AudioInfo>,
     recording: bool,
+    selecting: bool,
     started_at: Instant,
     output: Option<String>,
     ctl: Option<rec::Control>,
@@ -83,7 +105,6 @@ fn app() -> &'static mut App {
     unsafe { APP.as_mut().expect("app not initialised") }
 }
 
-/// 逻辑像素 → 物理像素（按当前显示器缩放）
 fn s(v: i32) -> i32 {
     let a = app();
     (v as f32 * a.scale).round() as i32
@@ -114,9 +135,28 @@ fn main() {
     let hmodule = unsafe { GetModuleHandleW(None) }.expect("module handle");
     let hinst = HINSTANCE(hmodule.0);
 
+    // 单实例：再次启动只是叫醒已经在托盘里的那个
+    unsafe {
+        let mtx = CreateMutexW(None, true, w!("Global\\saicord-single-instance"));
+        let lasterr = GetLastError();
+        log(&format!("main start pid={} mutex_ok={} lasterr={:?}", std::process::id(), mtx.is_ok(), lasterr));
+        if lasterr == ERROR_ALREADY_EXISTS {
+            match FindWindowW(CLS_TRAY, PCWSTR::null()) {
+                Ok(h) => {
+                    log(&format!("second instance: wake {:?} -> {:?}", h.0, PostMessageW(Some(h), WM_APP_START, WPARAM(0), LPARAM(0))));
+                }
+                Err(e) => log(&format!("second instance: tray window not found: {e}")),
+            }
+            return;
+        }
+    }
+
     unsafe {
         APP = Some(App {
             hinst,
+            tray: HWND::default(),
+            hicon: HICON::default(),
+            cfg: config::load(),
             overlay: HWND::default(),
             bar: HWND::default(),
             chip: HWND::default(),
@@ -133,6 +173,7 @@ fn main() {
             audio_on: true,
             audio_dev: audio::probe(),
             recording: false,
+            selecting: false,
             started_at: Instant::now(),
             output: None,
             ctl: None,
@@ -142,7 +183,9 @@ fn main() {
             bar_hover: 0,
         });
         register_classes(app().hinst);
-        open_overlay();
+        create_tray();
+        register_hotkeys();
+        start_selection();
     }
 
     unsafe {
@@ -155,12 +198,13 @@ fn main() {
 }
 
 unsafe fn register_classes(hinst: HINSTANCE) {
-    let classes: [(PCWSTR, WNDPROC); 5] = [
+    let classes: [(PCWSTR, WNDPROC); 6] = [
         (CLS_OVERLAY, Some(overlay_proc)),
         (CLS_BAR, Some(bar_proc)),
         (CLS_CHIP, Some(chip_proc)),
         (CLS_FRAME, Some(frame_proc)),
         (CLS_TOAST, Some(toast_proc)),
+        (CLS_TRAY, Some(tray_proc)),
     ];
     for (name, proc) in classes {
         let wc = WNDCLASSW {
@@ -174,6 +218,210 @@ unsafe fn register_classes(hinst: HINSTANCE) {
         RegisterClassW(&wc);
     }
 }
+
+// ---------------------------------------------------------------- tray
+
+unsafe fn make_icon() -> HICON {
+    const SIZE: i32 = 32;
+    let bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: SIZE,
+            biHeight: -SIZE,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+    let Ok(color) = CreateDIBSection(None, &bmi, DIB_RGB_COLORS, &mut ptr, None, 0) else {
+        return LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+    };
+    let px = std::slice::from_raw_parts_mut(ptr as *mut u32, (SIZE * SIZE) as usize);
+    let c = (SIZE as f32 - 1.0) / 2.0;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = x as f32 - c;
+            let dy = y as f32 - c;
+            let d = (dx * dx + dy * dy).sqrt();
+            let v = if d <= 6.0 {
+                0xFFFF_FFFF
+            } else if d <= 14.0 {
+                ACCENT
+            } else {
+                0
+            };
+            px[(y * SIZE + x) as usize] = v;
+        }
+    }
+    let mask_bits = [0u8; 4 * 32];
+    let mask = CreateBitmap(SIZE, SIZE, 1, 1, Some(mask_bits.as_ptr() as *const _));
+    let info = ICONINFO {
+        fIcon: TRUE,
+        hbmMask: mask,
+        hbmColor: color,
+        ..Default::default()
+    };
+    CreateIconIndirect(&info).unwrap_or_else(|_| {
+        LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
+    })
+}
+
+unsafe fn create_tray() {
+    let a = app();
+    let Ok(hwnd) = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        CLS_TRAY,
+        w!("saicord"),
+        WS_OVERLAPPED,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        Some(a.hinst),
+        None,
+    ) else {
+        return;
+    };
+    a.tray = hwnd;
+    a.hicon = make_icon();
+
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_APP_TRAY,
+        hIcon: a.hicon,
+        ..Default::default()
+    };
+    let tip: Vec<u16> = "saicord · 框选即录".encode_utf16().collect();
+    let n = tip.len().min(nid.szTip.len() - 1);
+    nid.szTip[..n].copy_from_slice(&tip[..n]);
+    if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+        log("Shell_NotifyIcon(NIM_ADD) failed");
+    }
+}
+
+unsafe fn register_hotkeys() {
+    let a = app();
+    if let Some((mods, vk)) = config::parse_hotkey(&a.cfg.start_hotkey) {
+        if RegisterHotKey(Some(a.tray), HOTKEY_START, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk).is_err() {
+            log(&format!("start hotkey 注册失败: {}", a.cfg.start_hotkey));
+        }
+    } else {
+        log(&format!("start hotkey 解析失败: {}", a.cfg.start_hotkey));
+    }
+    if let Some((mods, vk)) = config::parse_hotkey(&a.cfg.stop_hotkey) {
+        if RegisterHotKey(Some(a.tray), HOTKEY_STOP, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk).is_err() {
+            log(&format!("stop hotkey 注册失败: {}", a.cfg.stop_hotkey));
+        }
+    } else {
+        log(&format!("stop hotkey 解析失败: {}", a.cfg.stop_hotkey));
+    }
+}
+
+unsafe fn show_tray_menu(hwnd: HWND) {
+    let a = app();
+    let Ok(menu) = CreatePopupMenu() else { return };
+    let recording = a.recording;
+    let start_label = util::wide("开始录制");
+    let stop_label = util::wide("停止录制");
+    let cfg_label = util::wide("打开配置文件");
+    let quit_label = util::wide("退出");
+
+    if recording {
+        let _ = AppendMenuW(menu, MF_STRING, MENU_STOP, PCWSTR(stop_label.as_ptr()));
+    } else {
+        let _ = AppendMenuW(menu, MF_STRING, MENU_START, PCWSTR(start_label.as_ptr()));
+    }
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = AppendMenuW(menu, MF_STRING, MENU_CONFIG, PCWSTR(cfg_label.as_ptr()));
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, PCWSTR(quit_label.as_ptr()));
+
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let _ = SetForegroundWindow(hwnd);
+    let cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, None, hwnd, None).0;
+    let _ = DestroyMenu(menu);
+
+    match cmd as usize {
+        MENU_START => start_selection(),
+        MENU_STOP => stop_record(),
+        MENU_CONFIG => open_config(),
+        MENU_QUIT => quit_app(),
+        _ => {}
+    }
+}
+
+unsafe fn open_config() {
+    let p = config::path();
+    if !p.exists() {
+        config::save(&app().cfg);
+    }
+    let path = util::wide(&p.to_string_lossy());
+    let verb = util::wide("open");
+    ShellExecuteW(
+        None,
+        PCWSTR(verb.as_ptr()),
+        PCWSTR(path.as_ptr()),
+        PCWSTR::null(),
+        PCWSTR::null(),
+        SW_SHOWNORMAL,
+    );
+}
+
+unsafe fn quit_app() {
+    let a = app();
+    if a.recording {
+        stop_record();
+    }
+    if a.tray != HWND::default() {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: a.tray,
+            uID: 1,
+            ..Default::default()
+        };
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+        let _ = DestroyWindow(a.tray);
+        a.tray = HWND::default();
+    }
+    PostQuitMessage(0);
+}
+
+unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_APP_START => {
+            start_selection();
+            LRESULT(0)
+        }
+        WM_APP_TRAY => {
+            match lp.0 as u32 {
+                WM_LBUTTONUP => start_selection(),
+                WM_RBUTTONUP => show_tray_menu(hwnd),
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            match wp.0 as i32 {
+                HOTKEY_START => start_selection(),
+                HOTKEY_STOP => stop_record(),
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+// ---------------------------------------------------------------- selection
 
 fn cursor_point() -> POINT {
     let mut p = POINT::default();
@@ -219,6 +467,14 @@ unsafe fn make_fonts() {
     );
 }
 
+unsafe fn start_selection() {
+    let a = app();
+    if a.recording || a.selecting {
+            return;
+    }
+    open_overlay();
+}
+
 unsafe fn open_overlay() {
     let (mon, name) = monitor_under_cursor();
     let idx = monitor_index_for(&name);
@@ -226,10 +482,15 @@ unsafe fn open_overlay() {
     let h = mon.bottom - mon.top;
 
     let a = app();
+    if a.overlay != HWND::default() {
+        let _ = DestroyWindow(a.overlay);
+        a.overlay = HWND::default();
+    }
     a.mon = mon;
     a.mon_index = idx;
     a.sel = None;
     a.drag = None;
+    a.selecting = true;
 
     let screen = GetDC(None);
     let mem = CreateCompatibleDC(Some(screen));
@@ -276,7 +537,6 @@ unsafe fn open_overlay() {
     .expect("overlay window");
     a.overlay = hwnd;
 
-    // 按这台显示器的缩放比缩放整套 UI
     let dpi = GetDpiForWindow(hwnd);
     a.scale = if dpi >= 96 { dpi as f32 / 96.0 } else { 1.0 };
     make_fonts();
@@ -287,7 +547,24 @@ unsafe fn open_overlay() {
     let _ = SetFocus(Some(hwnd));
 }
 
-/// 选完就把遮罩位图还掉：4K 屏上它一个人就占 31.6 MB，录屏阶段用不上。
+unsafe fn cancel_selection() {
+    let a = app();
+    a.selecting = false;
+    a.sel = None;
+    a.drag = None;
+    if a.overlay != HWND::default() {
+        let _ = DestroyWindow(a.overlay);
+        a.overlay = HWND::default();
+    }
+    if a.bar != HWND::default() {
+        let _ = DestroyWindow(a.bar);
+        a.bar = HWND::default();
+    }
+    destroy_frames();
+    free_dib();
+}
+
+/// 选完就把遮罩位图还掉：4K 屏上它一个人就占 31.6 MB。
 unsafe fn free_dib() {
     let a = app();
     if let Some(dib) = a.dib.take() {
@@ -441,27 +718,28 @@ unsafe extern "system" fn overlay_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
                 .map(|sel| (sel.right - sel.left) >= min && (sel.bottom - sel.top) >= min)
                 .unwrap_or(false);
             if ok {
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                if let Some(sel) = a.sel {
-                    // 框选完成立刻立起边框，之后一直留着，直到录制结束
-                    destroy_frames();
-                    create_frame(sel);
+                let sel = a.sel.unwrap();
+                a.selecting = false;
+                if a.overlay != HWND::default() {
+                    let _ = DestroyWindow(a.overlay);
+                    a.overlay = HWND::default();
                 }
                 free_dib();
+                destroy_frames();
+                create_frame(sel);
                 show_bar();
             } else {
-                a.sel = None;
-                destroy_frames();
-                paint_overlay();
+                cancel_selection();
             }
             LRESULT(0)
         }
         WM_RBUTTONUP | WM_MBUTTONUP => {
-            std::process::exit(0);
+            cancel_selection();
+            LRESULT(0)
         }
         WM_KEYDOWN => {
             if wp.0 == 0x1B {
-                std::process::exit(0);
+                cancel_selection();
             }
             LRESULT(0)
         }
@@ -524,15 +802,10 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 
             let a = app();
             let pad = s(6);
-            let start_r = s(96);
-            let mic_l = s(100);
-            let mic_r = s(196);
-            let close_l = s(200);
-
             let mut r = RECT {
                 left: s(8),
                 top: pad,
-                right: start_r,
+                right: s(96),
                 bottom: bh - pad,
             };
             if a.bar_hover == 1 {
@@ -541,25 +814,25 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             draw_label(hdc, "● 开始", &mut r, true, C_ACCENT);
 
             let mut r = RECT {
-                left: mic_l,
+                left: s(100),
                 top: pad,
-                right: mic_r,
+                right: s(196),
                 bottom: bh - pad,
             };
             if a.bar_hover == 2 {
                 fill(hdc, &r, C_HOVER);
             }
-            let mic_text = if a.audio_dev.is_none() {
+            let audio_text = if a.audio_dev.is_none() {
                 "无音频设备"
             } else if a.audio_on {
                 "系统声 开"
             } else {
                 "系统声 关"
             };
-            draw_label(hdc, mic_text, &mut r, false, C_MUTED);
+            draw_label(hdc, audio_text, &mut r, false, C_MUTED);
 
             let mut r = RECT {
-                left: close_l,
+                left: s(200),
                 top: pad,
                 right: bw - s(8),
                 bottom: bh - pad,
@@ -599,7 +872,13 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
                 a.audio_on = !a.audio_on;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             } else if (s(200)..bar_w() - s(8)).contains(&p.x) {
-                std::process::exit(0);
+                cancel_selection();
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN => {
+            if wp.0 == 0x1B {
+                cancel_selection();
             }
             LRESULT(0)
         }
@@ -627,6 +906,10 @@ unsafe fn begin_record() {
         .to_string_lossy()
         .to_string();
 
+    // 启动时设备可能还没就绪，开录前再探一次
+    if a.audio_dev.is_none() && a.audio_on {
+        a.audio_dev = audio::probe();
+    }
     let audio_cfg = if a.audio_on {
         a.audio_dev.map(|m| (m.sample_rate, m.channels))
     } else {
@@ -652,10 +935,10 @@ unsafe fn begin_record() {
                 create_frame(sel);
             }
             create_chip(sel);
-            let _ = RegisterHotKey(Some(a.chip), 1, MOD_NOREPEAT, VK_F9.0 as u32);
         }
         Err(e) => {
             log(&format!("rec start failed: {e}"));
+            destroy_frames();
             show_toast(&format!("启动录制失败：{e}"));
         }
     }
@@ -734,7 +1017,6 @@ unsafe fn stop_record() {
         return;
     }
     a.recording = false;
-    let _ = UnregisterHotKey(Some(a.chip), 1);
 
     a.audio_stop.store(true, Ordering::Relaxed);
     if let Some(handle) = a.audio_thread.take() {
@@ -792,7 +1074,8 @@ unsafe extern "system" fn chip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 right: w - s(8),
                 bottom: h,
             };
-            draw_label(hdc, "F9 停止", &mut r, false, C_MUTED);
+            let hint = format!("{} 停止", a.cfg.stop_hotkey);
+            draw_label(hdc, &hint, &mut r, false, C_MUTED);
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
@@ -801,10 +1084,6 @@ unsafe extern "system" fn chip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            stop_record();
-            LRESULT(0)
-        }
-        WM_HOTKEY => {
             stop_record();
             LRESULT(0)
         }
@@ -892,7 +1171,6 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         }
         WM_TIMER => {
             let _ = DestroyWindow(hwnd);
-            PostQuitMessage(0);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

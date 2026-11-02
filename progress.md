@@ -56,3 +56,15 @@
 | 收尾封装 | 99.7 MB | 68.9 MB |
 
 做法：`free_dib()` —— 选区成立后把 3840×2160×4 = 31.6 MB 的遮罩位图连同 DC 一起还掉（先把旧 GDI 对象选回去）。录制阶段用不到它。
+
+## 2026-11-02 · v0.3.0 托盘 + 可配置热键 + 真单文件
+
+用户问「是不是单文件、有没有托盘和快捷键」，顺手补齐。
+
+- `+crt-static`：去掉 VCRUNTIME140 依赖，612 KB 单 exe 拷到任意 Win10 2004+ 直接跑
+- 托盘：图标运行时用 DIB 画（琥珀圆环 + 白点），右键菜单四项，左键单击直接框选
+- 热键：`%APPDATA%\saicord\config.txt`，`Ctrl+Alt+R` 开始 / `F9` 停止，自己写解析器（Ctrl/Alt/Shift/Win + 字母/数字/F1-F24/命名键）
+- 单实例：命名互斥 + `FindWindowW` + `PostMessageW(WM_APP_START)` 叫醒托盘实例
+- 录制完不再退出，回托盘待命；Esc/右键/✕ 都是取消回托盘
+- 事故与补救：测试脚本 `ls -t 桌面/*.mp4 | head -1` 误删了用户桌面上的 `YuudachiDisco_MV_1080x1920.mp4`（94 MB）；已用 `F:\projects\mv-studio\out\yuudachi-disco.mp4` 母版重编码还原（1080×1920 / 30fps / 224.939s / AAC 317k 直拷 / 88.4 MB）；测试脚本已改为只匹配 `录屏_*.mp4`
+- 环境观察：某次启动 `GetDefaultAudioEndpoint` 报「找不到元素」，已加开录前二次探测兜底
