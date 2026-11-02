@@ -3,7 +3,7 @@
 //! 屏幕用 Windows Graphics Capture（GPU 侧裁切，只回读选区），
 //! 编码走 Media Foundation 硬件 H.264，音频由 cpal 采麦克风后交给同一个编码器。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +29,8 @@ pub struct Flags {
     /// Some((采样率, 声道数)) 表示要录麦克风
     pub audio: Option<(u32, u16)>,
     pub started: Arc<AtomicBool>,
+    /// 已送达编码器的帧数（诊断用）
+    pub frames: Arc<AtomicU64>,
 }
 
 pub struct Recorder {
@@ -36,6 +38,7 @@ pub struct Recorder {
     crop: (u32, u32, u32, u32),
     buf: Vec<u8>,
     started: Arc<AtomicBool>,
+    frames: Arc<AtomicU64>,
 }
 
 impl Recorder {
@@ -70,18 +73,24 @@ impl GraphicsCaptureApiHandler for Recorder {
             None => AudioSettingsBuilder::new().disabled(true),
         };
 
+        let t_enc = std::time::Instant::now();
         let encoder = VideoEncoder::new(
             video,
             audio,
             ContainerSettingsBuilder::default(),
             &ctx.flags.out,
         )?;
+        crate::log(&format!(
+            "encoder init: {:.0}ms",
+            t_enc.elapsed().as_secs_f64() * 1000.0
+        ));
 
         Ok(Self {
             encoder: Some(encoder),
             crop: ctx.flags.crop,
             buf: Vec::new(),
             started: ctx.flags.started,
+            frames: ctx.flags.frames,
         })
     }
 
@@ -110,6 +119,7 @@ impl GraphicsCaptureApiHandler for Recorder {
             self.buf[dst..dst + w * 4].copy_from_slice(&raw[src..src + w * 4]);
         }
 
+        self.frames.fetch_add(1, Ordering::Relaxed);
         self.started.store(true, Ordering::Relaxed);
         if let Some(enc) = self.encoder.as_mut() {
             enc.send_frame_buffer(&self.buf, ts)?;
@@ -124,8 +134,11 @@ pub fn start(
     out: String,
     audio: Option<(u32, u16)>,
     started: Arc<AtomicBool>,
+    frames: Arc<AtomicU64>,
 ) -> Result<Control, RecError> {
+    let t0 = std::time::Instant::now();
     let monitor = windows_capture::monitor::Monitor::from_index(monitor_index)?;
+    let t_mon = t0.elapsed();
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::WithCursor,
@@ -139,7 +152,15 @@ pub fn start(
             out,
             audio,
             started,
+            frames,
         },
     );
-    Ok(Recorder::start_free_threaded(settings)?)
+    let t1 = std::time::Instant::now();
+    let ctl = Recorder::start_free_threaded(settings)?;
+    crate::log(&format!(
+        "rec::start: monitor={:.0}ms thread={:.0}ms",
+        t_mon.as_secs_f64() * 1000.0,
+        t1.elapsed().as_secs_f64() * 1000.0
+    ));
+    Ok(ctl)
 }

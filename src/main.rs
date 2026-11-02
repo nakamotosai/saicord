@@ -5,9 +5,9 @@ mod config;
 mod rec;
 mod util;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
@@ -35,6 +35,8 @@ const CLS_TRAY: PCWSTR = w!("SaicordTray");
 
 const WM_APP_START: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
+
+static TRAY_ONLY: AtomicBool = AtomicBool::new(false);
 
 const HOTKEY_START: i32 = 1;
 const HOTKEY_STOP: i32 = 2;
@@ -95,7 +97,9 @@ struct App {
     audio_stop: Arc<AtomicBool>,
     audio_thread: Option<std::thread::JoinHandle<()>>,
     first_frame: Arc<AtomicBool>,
+    frame_count: Arc<AtomicU64>,
     bar_hover: i32,
+    timer_pending: bool,
 }
 
 static mut APP: Option<App> = None;
@@ -119,12 +123,247 @@ fn bar_h() -> i32 {
 
 pub fn log(msg: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(r"F:\tmp\saicord.log")
-    {
+    let path = match std::env::var("SAICORD_LOG") {
+        Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
+        _ => match std::env::var("LOCALAPPDATA") {
+            Ok(dir) => {
+                let dir = std::path::PathBuf::from(dir).join("saicord");
+                let _ = std::fs::create_dir_all(&dir);
+                dir.join("saicord.log")
+            }
+            Err(_) => return,
+        },
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{msg}");
+    }
+}
+
+
+// ---------------------------------------------------------------- 测试模式
+// 无窗口、无遮罩：`saicord.exe --test <mode> ...`，只写日志不弹任何界面。
+//   encode  <w> <h> <fps> <secs> <out>            合成画面走同一个编码器
+//   capture <x> <y> <w> <h> <secs> <out> [audio]  真实采集指定矩形（物理像素）
+//   info                                          显示器物理尺寸
+fn test_mode(args: &[String]) {
+    use windows_capture::encoder::{
+        AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
+        VideoSettingsSubType,
+    };
+
+    let mode = args.first().map(|s| s.as_str()).unwrap_or("");
+    match mode {
+        "info" => unsafe {
+            let w = GetSystemMetrics(SM_CXSCREEN);
+            let h = GetSystemMetrics(SM_CYSCREEN);
+            log(&format!("info: screen {}x{}", w, h));
+        },
+        "encode" => {
+            let w: u32 = args[1].parse().unwrap();
+            let h: u32 = args[2].parse().unwrap();
+            let fps: u32 = args[3].parse().unwrap();
+            let secs: u32 = args[4].parse().unwrap();
+            let out = args[5].clone();
+            let n = (fps as u64) * (secs as u64);
+
+            let bitrate = if w * h > 1920 * 1080 { 16_000_000 } else { 8_000_000 };
+            let video = VideoSettingsBuilder::new(w, h)
+                .sub_type(VideoSettingsSubType::H264)
+                .frame_rate(fps)
+                .bitrate(bitrate);
+            let audio = AudioSettingsBuilder::new().disabled(true);
+            let mut enc = match VideoEncoder::new(
+                video,
+                audio,
+                ContainerSettingsBuilder::default(),
+                &out,
+            ) {
+                Ok(e) => e,
+                Err(e) => {
+                    log(&format!("encode: open failed {e}"));
+                    return;
+                }
+            };
+
+            // 静态底：渐变 + 棋盘，保证有细节可测画质
+            let mut bg = vec![0u8; (w * h * 4) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    let checker = ((x / 32 + y / 32) % 2) as u8;
+                    bg[i] = (x * 255 / w.max(1)) as u8;
+                    bg[i + 1] = (y * 255 / h.max(1)) as u8;
+                    bg[i + 2] = checker * 180;
+                    bg[i + 3] = 255;
+                }
+            }
+            let mut buf = bg.clone();
+            let t0 = Instant::now();
+            let mut worst = Duration::ZERO;
+            for i in 0..n {
+                buf.copy_from_slice(&bg);
+                let bx = ((i * 7) % w.max(1) as u64) as u32;
+                let by = ((i * 3) % h.max(1) as u64) as u32;
+                for y in by..(by + 96).min(h) {
+                    for x in bx..(bx + 96).min(w) {
+                        let p = ((y * w + x) * 4) as usize;
+                        buf[p..p + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+                // 帧号条码：16 位，每位 16x16，画在缓冲顶部（落到成片底部）
+                for bit in 0..16 {
+                    let on = (i >> bit) & 1 == 1;
+                    let v = if on { 255u8 } else { 0u8 };
+                    for y in 0..16u32 {
+                        for x in 0..16u32 {
+                            let px = bit as u32 * 16 + x;
+                            let p = ((y * w + px) * 4) as usize;
+                            buf[p] = v;
+                            buf[p + 1] = v;
+                            buf[p + 2] = v;
+                            buf[p + 3] = 255;
+                        }
+                    }
+                }
+                let ts = (i as i64) * 10_000_000 / fps as i64;
+                let s = Instant::now();
+                if let Err(e) = enc.send_frame_buffer(&buf, ts) {
+                    log(&format!("encode: frame {i} failed {e}"));
+                    break;
+                }
+                let d = s.elapsed();
+                if d > worst {
+                    worst = d;
+                }
+                let target = Duration::from_nanos((i + 1) * 1_000_000_000 / fps as u64);
+                let el = t0.elapsed();
+                if target > el {
+                    std::thread::sleep(target - el);
+                }
+            }
+            let _ = enc.finish();
+            log(&format!(
+                "encode done: {}x{}@{} frames={} wall={:.2}s worst_send={:.1}ms",
+                w,
+                h,
+                fps,
+                n,
+                t0.elapsed().as_secs_f64(),
+                worst.as_secs_f64() * 1000.0
+            ));
+        }
+        "capture" => {
+            let x: i32 = args[1].parse().unwrap();
+            let y: i32 = args[2].parse().unwrap();
+            let w: i32 = args[3].parse().unwrap();
+            let h: i32 = args[4].parse().unwrap();
+            let secs: u32 = args[5].parse().unwrap();
+            let out = args[6].clone();
+            let want_audio = args.get(7).map(|s| s == "audio").unwrap_or(false);
+
+            let started = Arc::new(AtomicBool::new(false));
+            let frame_count = Arc::new(AtomicU64::new(0));
+            let dev = if want_audio { audio::probe() } else { None };
+            let audio_cfg = dev.map(|m| (m.sample_rate, m.channels));
+            log(&format!(
+                "capture: rect {x},{y} {w}x{h} secs={secs} audio={:?}",
+                audio_cfg
+            ));
+            let t_start = Instant::now();
+            let mut ctl = match rec::start(
+                1,
+                (x.max(0) as u32, y.max(0) as u32, (x + w).max(0) as u32, (y + h).max(0) as u32),
+                out.clone(),
+                audio_cfg,
+                started.clone(),
+                frame_count.clone(),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    log(&format!("capture: start failed {e}"));
+                    return;
+                }
+            };
+            log(&format!("capture: start took {:.0}ms", t_start.elapsed().as_secs_f64() * 1000.0));
+            let cb = ctl.callback();
+            let stop = Arc::new(AtomicBool::new(false));
+            let audio_thread = dev.map(|info| audio::spawn(info, cb.clone(), started.clone(), stop.clone()));
+
+            let t0 = Instant::now();
+            std::thread::sleep(Duration::from_secs(secs as u64));
+            stop.store(true, Ordering::Relaxed);
+            if let Some(h) = audio_thread {
+                let _ = h.join();
+            }
+            let cb2 = ctl.callback();
+            let _ = ctl.stop();
+            let mut r = cb2.lock();
+            if let Some(e) = r.encoder.take() {
+                let _ = e.finish();
+            }
+            drop(r);
+            let n = frame_count.load(Ordering::Relaxed);
+            if n == 0 {
+                let _ = std::fs::remove_file(&out);
+            }
+            log(&format!(
+                "capture done: frames={} wall={:.2}s out={out}",
+                frame_count.load(Ordering::Relaxed),
+                t0.elapsed().as_secs_f64()
+            ));
+        }
+        "loop" => {
+            // 反复起停，看句柄/内存有没有泄漏
+            let n: u32 = args[1].parse().unwrap();
+            let secs: u32 = args[2].parse().unwrap();
+            let dir = args[3].clone();
+            for i in 0..n {
+                let out = format!("{dir}/loop_{i}.mp4");
+                let started = Arc::new(AtomicBool::new(false));
+                let frame_count = Arc::new(AtomicU64::new(0));
+                let mut ctl = match rec::start(
+                    1,
+                    (3000, 1200, 3640, 1560),
+                    out,
+                    None,
+                    started.clone(),
+                    frame_count.clone(),
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log(&format!("loop {i}: start failed {e}"));
+                        continue;
+                    }
+                };
+                std::thread::sleep(Duration::from_secs(secs as u64));
+                let cb = ctl.callback();
+                let _ = ctl.stop();
+                let mut r = cb.lock();
+                if let Some(e) = r.encoder.take() {
+                    let _ = e.finish();
+                }
+                drop(r);
+                unsafe {
+                    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+                    let mut handles = 0u32;
+                    let _ = GetProcessHandleCount(GetCurrentProcess(), &mut handles);
+                    let cur = GetCurrentProcess();
+                    let mut pmc = windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS::default();
+                    let _ = windows::Win32::System::ProcessStatus::GetProcessMemoryInfo(
+                        cur,
+                        &mut pmc,
+                        std::mem::size_of_val(&pmc) as u32,
+                    );
+                    log(&format!(
+                        "loop {i}: frames={} handles={} ws={}MB",
+                        frame_count.load(Ordering::Relaxed),
+                        handles,
+                        pmc.WorkingSetSize / 1024 / 1024
+                    ));
+                }
+            }
+        }
+        other => log(&format!("test: unknown mode {other}")),
     }
 }
 
@@ -132,6 +371,13 @@ fn main() {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(|s| s.as_str()) == Some("--test") {
+        test_mode(&argv[1..]);
+        return;
+    }
+    // --tray：只驻留托盘，不弹框选（开机自启用）
+    TRAY_ONLY.store(argv.iter().any(|a| a == "--tray"), Ordering::Relaxed);
     let hmodule = unsafe { GetModuleHandleW(None) }.expect("module handle");
     let hinst = HINSTANCE(hmodule.0);
 
@@ -180,12 +426,16 @@ fn main() {
             audio_stop: Arc::new(AtomicBool::new(false)),
             audio_thread: None,
             first_frame: Arc::new(AtomicBool::new(false)),
+            frame_count: Arc::new(AtomicU64::new(0)),
             bar_hover: 0,
+            timer_pending: false,
         });
         register_classes(app().hinst);
         create_tray();
         register_hotkeys();
-        start_selection();
+        if !TRAY_ONLY.load(Ordering::Relaxed) {
+            start_selection();
+        }
     }
 
     unsafe {
@@ -314,16 +564,20 @@ unsafe fn register_hotkeys() {
     if let Some((mods, vk)) = config::parse_hotkey(&a.cfg.start_hotkey) {
         if RegisterHotKey(Some(a.tray), HOTKEY_START, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk).is_err() {
             log(&format!("start hotkey 注册失败: {}", a.cfg.start_hotkey));
+            show_toast(&format!("快捷键 {} 被占用，开始键没生效", a.cfg.start_hotkey));
         }
     } else {
         log(&format!("start hotkey 解析失败: {}", a.cfg.start_hotkey));
+        show_toast(&format!("开始键写法不对：{}", a.cfg.start_hotkey));
     }
     if let Some((mods, vk)) = config::parse_hotkey(&a.cfg.stop_hotkey) {
         if RegisterHotKey(Some(a.tray), HOTKEY_STOP, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk).is_err() {
             log(&format!("stop hotkey 注册失败: {}", a.cfg.stop_hotkey));
+            show_toast(&format!("快捷键 {} 被占用，停止键没生效", a.cfg.stop_hotkey));
         }
     } else {
         log(&format!("stop hotkey 解析失败: {}", a.cfg.stop_hotkey));
+        show_toast(&format!("停止键写法不对：{}", a.cfg.stop_hotkey));
     }
 }
 
@@ -893,6 +1147,11 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
 unsafe fn begin_record() {
     let a = app();
     let Some(sel) = a.sel else { return };
+    // 硬件编码器（NVENC）对最小分辨率有限制：约 145×49，留点余量
+    if sel.right - sel.left < 160 || sel.bottom - sel.top < 64 {
+        show_toast("选区太小：至少 160×64 像素");
+        return;
+    }
     let _ = DestroyWindow(a.bar);
     a.bar = HWND::default();
 
@@ -918,14 +1177,29 @@ unsafe fn begin_record() {
         None
     };
     a.first_frame = Arc::new(AtomicBool::new(false));
+    a.frame_count = Arc::new(AtomicU64::new(0));
 
-    match rec::start(a.mon_index, crop, out.clone(), audio_cfg, a.first_frame.clone()) {
+    // 编码器初始化要 ~1s：先给用户看到录制框和计时条，再去启动采集
+    a.started_at = Instant::now();
+    a.timer_pending = true;
+    a.recording = true;
+    if a.frames.is_empty() {
+        create_frame(sel);
+    }
+    create_chip(sel);
+
+    match rec::start(
+        a.mon_index,
+        crop,
+        out.clone(),
+        audio_cfg,
+        a.first_frame.clone(),
+        a.frame_count.clone(),
+    ) {
         Ok(ctl) => {
             let cb = ctl.callback();
             a.ctl = Some(ctl);
             a.output = Some(out);
-            a.recording = true;
-            a.started_at = Instant::now();
             a.audio_stop = Arc::new(AtomicBool::new(false));
 
             if let Some(info) = a.audio_dev.filter(|_| a.audio_on) {
@@ -933,14 +1207,17 @@ unsafe fn begin_record() {
                 a.audio_thread = Some(handle);
             }
 
-            if a.frames.is_empty() {
-                create_frame(sel);
-            }
-            create_chip(sel);
         }
         Err(e) => {
             log(&format!("rec start failed: {e}"));
+            a.recording = false;
+            // 编码器可能已经建了半个文件，删掉别留垃圾
+            let _ = std::fs::remove_file(&out);
             destroy_frames();
+            if a.chip != HWND::default() {
+                let _ = DestroyWindow(a.chip);
+                a.chip = HWND::default();
+            }
             show_toast(&format!("启动录制失败：{e}"));
         }
     }
@@ -1025,12 +1302,16 @@ unsafe fn stop_record() {
         let _ = handle.join();
     }
 
+    let mut save_err = None;
     if let Some(ctl) = a.ctl.take() {
         let cb = ctl.callback();
         let _ = ctl.stop();
         let mut rec = cb.lock();
         if let Some(enc) = rec.encoder.take() {
-            let _ = enc.finish();
+            if let Err(e) = enc.finish() {
+                log(&format!("finish failed: {e}"));
+                save_err = Some(e.to_string());
+            }
         }
     }
 
@@ -1040,12 +1321,32 @@ unsafe fn stop_record() {
         a.chip = HWND::default();
     }
 
+    let secs = a.started_at.elapsed().as_secs_f64();
+    log(&format!(
+        "record stop: frames={} secs={:.2} expected≈{}",
+        a.frame_count.load(Ordering::Relaxed),
+        secs,
+        (secs * 30.0).round() as u64
+    ));
+
     let out = a.output.take().unwrap_or_default();
     let name = std::path::Path::new(&out)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or(out);
-    show_toast(&format!("已保存到桌面：{name}"));
+        .unwrap_or_else(|| out.clone());
+    let frames = a.frame_count.load(Ordering::Relaxed);
+    match save_err {
+        Some(e) => {
+            let _ = std::fs::remove_file(&out);
+            show_toast(&format!("保存失败：{e}"));
+        }
+        None if frames == 0 => {
+            // 一帧都没采到：MF 仍然会写出一个 0 字节的坏文件
+            let _ = std::fs::remove_file(&out);
+            show_toast("没录到画面，已取消");
+        }
+        None => show_toast(&format!("已保存到桌面：{name}")),
+    }
 }
 
 unsafe extern "system" fn chip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1062,14 +1363,24 @@ unsafe extern "system" fn chip_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             };
             fill(hdc, &full, C_BG);
             let a = app();
-            let secs = a.started_at.elapsed().as_secs();
+            // 编码器要 ~1s 才出第一帧：这之前显示「启动中」，计时从第一帧开始
+            let ready = a.first_frame.load(Ordering::Relaxed);
+            if ready && a.timer_pending {
+                a.started_at = Instant::now();
+                a.timer_pending = false;
+            }
+            let label = if ready {
+                format!("● {}", util::mmss(a.started_at.elapsed().as_secs()))
+            } else {
+                "● 启动中".to_string()
+            };
             let mut r = RECT {
                 left: s(10),
                 top: 0,
                 right: s(96),
                 bottom: h,
             };
-            draw_label(hdc, &format!("● {}", util::mmss(secs)), &mut r, true, C_ACCENT);
+            draw_label(hdc, &label, &mut r, true, C_ACCENT);
             let mut r = RECT {
                 left: s(96),
                 top: 0,
@@ -1165,7 +1476,7 @@ unsafe extern "system" fn toast_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     right: w - s(16),
                     bottom: h,
                 };
-                DrawTextW(hdc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+                DrawTextW(hdc, &mut buf, &mut r, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
                 SelectObject(hdc, old);
             }
             let _ = EndPaint(hwnd, &ps);

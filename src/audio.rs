@@ -125,6 +125,10 @@ pub fn spawn(
             }
             let mut packet = ep.capture.GetNextPacketSize().unwrap_or(0);
             while packet > 0 {
+                // 停止时也要能立刻退出，避免设备疯狂出包把内层循环占死
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 let mut data: *mut u8 = std::ptr::null_mut();
                 let mut frames = 0u32;
                 let mut flags = 0u32;

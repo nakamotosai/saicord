@@ -75,3 +75,18 @@
 - 生成 `assets/saicord.ico`（深底圆角 + 琥珀环 + 白点，256→16 六档），build.rs + winresource 嵌进 exe
 - 桌面快捷方式 `saicord 录屏.lnk` → `F:\tools\saicord\saicord.exe`
 - 验证：F8 唤起后 EnumWindows 出现 `SaicordOverlay visible=True`，Esc 后消失
+
+## 2026-11-02 · v0.4.0 实机压测
+
+无界面测试模式 `--test encode|capture|loop|info`（不进单实例锁、不建任何窗口）。
+
+跑了的矩阵与结论：
+- 编码器 1080p30/60/4K30：帧数 900/1200/450 全部无损，文件恒为 CFR 33.3ms，无丢帧无抖动
+- 首帧会丢 1 帧（MF sink writer 预热），第 2 帧被复制一次补位，影响 33ms
+- 静止画面 PSNR 54.9dB；高速彩色测试图 33dB（chroma 子采样下限）
+- 音画：120s 录制，视频 120.033s / 音频 120.000s，漂移 33ms
+- 采集节奏：143Hz 屏 + 30fps 最小更新间隔 → 实际 28.6fps，30fps CFR 里约 4% 是补帧
+- 连续 40 次起停：句柄 +1.1/次、内存未持续增长（第三方库每会话留 1 个句柄）
+- 修掉的 bug：<145×49 选区起录失败留空文件；0 帧停止写出 0 字节 MP4；finish 失败仍报成功；快捷键占用无提示
+- 起录延迟：`rec::start` 1027ms（编码器初始化 533ms + WGC/D3D 建会话 494ms）；已改为先显示录制框/计时条再起采集，计时从第一帧开始
+- 全链路 UI 测试（PostMessage 模拟拖选，不动真实鼠标）：F8 → 选区 → 开始 → 3s → F9 → 落盘 1400×1000 H.264+AAC，声音同步
