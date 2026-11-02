@@ -417,12 +417,36 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // 升级重启握手：等上一个进程退出，再走正常启动（抢单实例互斥）
+    if let Some(i) = argv.iter().position(|a| a == "--wait-for") {
+        if let Some(pid) = argv.get(i + 1).and_then(|p| p.parse::<u32>().ok()) {
+            unsafe {
+                use windows::Win32::System::Threading::{
+                    OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+                };
+                let t0 = Instant::now();
+                match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                    Ok(h) => {
+                        let _ = WaitForSingleObject(h, 15_000);
+                        let _ = CloseHandle(h);
+                        log(&format!(
+                            "wait-for: pid={pid} 等 {:.2}s",
+                            t0.elapsed().as_secs_f64()
+                        ));
+                    }
+                    Err(e) => log(&format!("wait-for: 打不开 pid={pid}: {e}")),
+                }
+            }
+        }
+    }
     if argv.first().map(|s| s.as_str()) == Some("--test") {
         test_mode(&argv[1..]);
         return;
     }
     // --tray：只驻留托盘，不弹框选（开机自启用）
     TRAY_ONLY.store(argv.iter().any(|a| a == "--tray"), Ordering::Relaxed);
+    // --upgrade：启动后立刻走一次自动升级（脚本化/计划任务用）
+    let upgrade_now = argv.iter().any(|a| a == "--upgrade");
     let hmodule = unsafe { GetModuleHandleW(None) }.expect("module handle");
     let hinst = HINSTANCE(hmodule.0);
 
@@ -480,7 +504,9 @@ fn main() {
         register_hotkeys();
         let cur = std::env::current_exe().unwrap_or_default();
         update::cleanup_old(&cur);
-        if app().cfg.update_check {
+        if upgrade_now {
+            spawn_upgrade();
+        } else if app().cfg.update_check {
             spawn_update_check(6);
         }
         if !TRAY_ONLY.load(Ordering::Relaxed) {
@@ -664,7 +690,22 @@ fn spawn_upgrade() {
     std::thread::spawn(move || {
         let (tag, url) = match UPDATE_READY.lock().clone() {
             Some(v) => v,
-            None => return,
+            // 手动/脚本触发时还没查过，先查一次
+            None => match update::latest() {
+                Ok(rel) if update::is_newer(&rel.tag, update::CURRENT) => {
+                    log(&format!("update: 手动升级，发现 {}", rel.tag));
+                    (rel.tag, rel.url)
+                }
+                Ok(rel) => {
+                    log(&format!("update: 手动升级，已是最新 {}", rel.tag));
+                    return;
+                }
+                Err(e) => {
+                    *UPDATE_ERR.lock() = Some(e.clone());
+                    log(&format!("update: 手动升级检查失败 {e}"));
+                    return;
+                }
+            },
         };
         let ok = match update::download(&url, &tag) {
             Ok(path) => {
@@ -883,9 +924,19 @@ unsafe extern "system" fn tray_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_UPGRADE_DONE => {
             if wp.0 == 1 {
                 show_toast("升级完成，正在重启…");
+                // 新进程要等旧进程彻底退出再抢单实例互斥，否则会被判成
+                // 「第二个实例」直接退出。用 --wait-for <pid> 做握手，不经过 shell。
                 let cur = std::env::current_exe().unwrap_or_default();
-                let _ = std::process::Command::new(&cur).arg("--tray").spawn();
-                std::thread::sleep(Duration::from_millis(400));
+                match std::process::Command::new(&cur)
+                    .arg("--tray")
+                    .arg("--wait-for")
+                    .arg(std::process::id().to_string())
+                    .spawn()
+                {
+                    Ok(p) => log(&format!("update: 已启动新进程 pid={}", p.id())),
+                    Err(e) => log(&format!("update: 启动新进程失败 {e}")),
+                }
+                std::thread::sleep(Duration::from_millis(200));
                 quit_app();
             } else {
                 let e = UPDATE_ERR.lock().clone().unwrap_or_else(|| "未知错误".into());
