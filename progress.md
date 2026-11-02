@@ -25,3 +25,13 @@
 | 输出 | H.264 600×400 30fps + AAC 48k，抽帧琥珀像素 0 |
 
 **下一步**：GitHub 公开仓 + Gitea 镜像 + v0.1.0 release；之后进 M3（系统声音）。
+
+## 2026-11-02 · M3 系统声音
+
+用户令：不混音，只录系统声音。
+
+- `src/audio.rs` 从 cpal 麦克风整体换成 WASAPI loopback（默认渲染端点）
+- 踩坑：`IMMDevice::Activate` 在 windows-rs 里被 `Win32_System_Com_StructuredStorage` + `Win32_System_Variant` 双重 cfg 包着，少一个 feature 就是「方法不存在」
+- 踩坑：第一次测是 -91 dB 全静音——ffplay 那条测试音源没真正出声；换 `System.Media.SoundPlayer` 后立刻有电平
+- 验证：录 440 Hz 正弦 → 抽音轨做 DFT → **峰值正好 440 Hz**，max_volume -20.8 dB
+- 体积：551 KB → 498 KB（去掉 cpal）

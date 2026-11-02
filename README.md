@@ -20,7 +20,7 @@
 
 - 拖拽框选任意矩形区域，实时显示尺寸
 - 录制期间**选区边框常亮**（画在选区外侧，不会进画面）
-- 麦克风开关，录音与画面同步起算
+- 系统声音（扬声器 loopback）开关，音画同步起算
 - F9 或点计时条停止，自动保存到桌面
 - 按显示器 DPI 缩放整套界面（200% 下按钮不会变小）
 - Esc / 右键随时取消
@@ -31,7 +31,7 @@
 |---|---|
 | 抓屏 | Windows Graphics Capture（D3D11 侧 `CopySubresourceRegion` 裁切，只回读选区） |
 | 编码 | Media Foundation 硬件 H.264 + AAC，MP4 封装 |
-| 音频 | cpal 采默认麦克风，16-bit PCM 直接送编码器 |
+| 音频 | WASAPI loopback 采默认播放设备，float32→16-bit PCM 直接送编码器 |
 | 选区遮罩 | 分层窗口 + per-pixel alpha（`UpdateLayeredWindow`） |
 | 界面 | 原生 Win32，无 GUI 框架 |
 
@@ -50,19 +50,19 @@ cargo build --release
 
 - 只覆盖光标所在的显示器；跨屏框选不支持
 - 选区最小 32×32 逻辑像素
-- 只录麦克风，不录系统声音
+- 只录系统声音（扬声器），不录麦克风；两者不做混音
 - 停止只认 F9 / 点击计时条；无托盘常驻
 
 ## Roadmap
 
-- [ ] 系统声音（WASAPI loopback）
+- [ ] 麦克风采集（与系统声二选一，不混音）
 - [ ] 多显示器 / 跨屏选区
 - [ ] 可配置热键与保存目录
 - [ ] 录制后托盘提示与「打开所在文件夹」
 
 ## English
 
-Minimal region screen recorder for Windows. Drag a rectangle, press start, press F9, get an MP4 on your Desktop. Built in Rust on Windows Graphics Capture + Media Foundation — no Electron, no ffmpeg, no editor UI.
+Minimal region screen recorder for Windows. Drag a rectangle, press start, press F9, get an MP4 with system audio on your Desktop. Built in Rust on Windows Graphics Capture + Media Foundation — no Electron, no ffmpeg, no editor UI.
 
 ## 许可
 

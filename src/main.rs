@@ -62,8 +62,8 @@ struct App {
     sel: Option<RECT>,
     drag: Option<POINT>,
     dib: Option<Dib>,
-    mic_on: bool,
-    mic: Option<audio::MicInfo>,
+    audio_on: bool,
+    audio_dev: Option<audio::AudioInfo>,
     recording: bool,
     started_at: Instant,
     output: Option<String>,
@@ -128,8 +128,8 @@ fn main() {
             sel: None,
             drag: None,
             dib: None,
-            mic_on: true,
-            mic: audio::probe(),
+            audio_on: true,
+            audio_dev: audio::probe(),
             recording: false,
             started_at: Instant::now(),
             output: None,
@@ -528,12 +528,12 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             if a.bar_hover == 2 {
                 fill(hdc, &r, C_HOVER);
             }
-            let mic_text = if a.mic.is_none() {
-                "无麦克风"
-            } else if a.mic_on {
-                "麦克风 开"
+            let mic_text = if a.audio_dev.is_none() {
+                "无音频设备"
+            } else if a.audio_on {
+                "系统声 开"
             } else {
-                "麦克风 关"
+                "系统声 关"
             };
             draw_label(hdc, mic_text, &mut r, false, C_MUTED);
 
@@ -575,7 +575,7 @@ unsafe extern "system" fn bar_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             if (s(8)..s(96)).contains(&p.x) {
                 begin_record();
             } else if (s(100)..s(196)).contains(&p.x) {
-                a.mic_on = !a.mic_on;
+                a.audio_on = !a.audio_on;
                 let _ = InvalidateRect(Some(hwnd), None, false);
             } else if (s(200)..bar_w() - s(8)).contains(&p.x) {
                 std::process::exit(0);
@@ -606,8 +606,8 @@ unsafe fn begin_record() {
         .to_string_lossy()
         .to_string();
 
-    let audio_cfg = if a.mic_on {
-        a.mic.map(|m| (m.sample_rate, m.channels))
+    let audio_cfg = if a.audio_on {
+        a.audio_dev.map(|m| (m.sample_rate, m.channels))
     } else {
         None
     };
@@ -622,7 +622,7 @@ unsafe fn begin_record() {
             a.started_at = Instant::now();
             a.audio_stop = Arc::new(AtomicBool::new(false));
 
-            if let Some(info) = a.mic.filter(|_| a.mic_on) {
+            if let Some(info) = a.audio_dev.filter(|_| a.audio_on) {
                 let handle = audio::spawn(info, cb, a.first_frame.clone(), a.audio_stop.clone());
                 a.audio_thread = Some(handle);
             }

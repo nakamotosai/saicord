@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v0.2.0 — 2026-11-02
+
+- 音频改为**系统声音**：WASAPI loopback 抓默认播放设备，不再采麦克风，不做混音
+- 移除 cpal 依赖，二进制 551 KB → 498 KB
+- 工具条按钮改为「系统声 开/关」，无播放设备时显示「无音频设备」
+- 修 `IMMDevice::Activate` 缺 feature 导致的编译失败（`Win32_System_Variant`）
+
+
 ## v0.1.0 — 2026-11-02
 
 首个版本。

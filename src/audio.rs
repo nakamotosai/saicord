@@ -1,105 +1,172 @@
-//! 麦克风采集：cpal 在自己的线程里建流、保活，采到的 PCM 直接喂给编码器。
+//! 系统声音采集：WASAPI loopback（渲染端点的环回）。
+//!
+//! 不混音、不碰麦克风——录的就是扬声器里正在放的东西。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
+use windows::core::GUID;
+use windows::Win32::Media::Audio::{
+    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+};
 
 use crate::rec::Recorder;
 
+/// MMDeviceEnumerator 的 CLSID
+const CLSID_MMDEVICE_ENUMERATOR: GUID = GUID::from_u128(0xBCDE0395_E52F_467C_8E3D_C4579291692E);
+
 #[derive(Clone, Copy, Debug)]
-pub struct MicInfo {
+pub struct AudioInfo {
     pub sample_rate: u32,
     pub channels: u16,
 }
 
-pub fn probe() -> Option<MicInfo> {
-    let host = cpal::default_host();
-    let device = host.default_input_device()?;
-    let cfg = device.default_input_config().ok()?;
-    Some(MicInfo {
-        sample_rate: cfg.sample_rate().0,
-        channels: cfg.channels(),
+struct Endpoint {
+    client: IAudioClient,
+    capture: IAudioCaptureClient,
+    info: AudioInfo,
+    block_align: u32,
+    is_float: bool,
+}
+
+unsafe fn open_endpoint() -> Result<Endpoint, String> {
+    let enumerator: IMMDeviceEnumerator =
+        CoCreateInstance(&CLSID_MMDEVICE_ENUMERATOR, None, CLSCTX_ALL)
+            .map_err(|e| format!("CoCreateInstance: {e}"))?;
+    let device = enumerator
+        .GetDefaultAudioEndpoint(eRender, eConsole)
+        .map_err(|e| format!("GetDefaultAudioEndpoint: {e}"))?;
+    let client: IAudioClient = device
+        .Activate(CLSCTX_ALL, None)
+        .map_err(|e| format!("Activate: {e}"))?;
+    let fmt_ptr = client.GetMixFormat().map_err(|e| format!("GetMixFormat: {e}"))?;
+    let fmt = &*fmt_ptr;
+    let info = AudioInfo {
+        sample_rate: fmt.nSamplesPerSec,
+        channels: fmt.nChannels,
+    };
+    let block_align = fmt.nBlockAlign as u32;
+    let is_float = fmt.wBitsPerSample == 32;
+
+    client
+        .Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK,
+            10_000_000, // 1s 缓冲
+            0,
+            fmt_ptr,
+            None,
+        )
+        .map_err(|e| format!("Initialize(loopback): {e}"))?;
+
+    let capture: IAudioCaptureClient = client.GetService().map_err(|e| format!("GetService: {e}"))?;
+    client.Start().map_err(|e| format!("Start: {e}"))?;
+
+    Ok(Endpoint {
+        client,
+        capture,
+        info,
+        block_align,
+        is_float,
     })
 }
 
+/// 探测默认播放设备；没有设备就返回 None（只录画面）。
+pub fn probe() -> Option<AudioInfo> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut ep = match open_endpoint() {
+            Ok(ep) => ep,
+            Err(e) => {
+                crate::log(&format!("audio probe failed: {e}"));
+                return None;
+            }
+        };
+        let info = ep.info;
+        crate::log(&format!("audio probe ok: {}Hz {}ch", info.sample_rate, info.channels));
+        let _ = ep.client.Stop();
+        Some(info)
+    }
+}
+
 pub fn spawn(
-    info: MicInfo,
+    info: AudioInfo,
     cb: Arc<Mutex<Recorder>>,
     started: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        let host = cpal::default_host();
-        let Some(device) = host.default_input_device() else {
-            return;
-        };
-        let config = cpal::StreamConfig {
-            channels: info.channels,
-            sample_rate: cpal::SampleRate(info.sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
-
-        let push = move |pcm: Vec<u8>| {
-            if pcm.is_empty() {
+    std::thread::spawn(move || unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let mut ep = match open_endpoint() {
+            Ok(ep) => ep,
+            Err(e) => {
+                crate::log(&format!("audio open failed: {e}"));
                 return;
             }
-            cb.lock().push_audio(&pcm);
         };
+        crate::log(&format!(
+            "audio open ok: {}Hz {}ch float={} block_align={}",
+            ep.info.sample_rate, ep.info.channels, ep.is_float, ep.block_align
+        ));
+        // 设备可能在探测和真正开录之间换了，以实际端点为准
+        let _ = info;
 
-        let stream = match device.default_input_config() {
-            Ok(cfg) if cfg.sample_format() == cpal::SampleFormat::I16 => {
-                let started = started.clone();
-                let push = push.clone();
-                device.build_input_stream(
-                    &config,
-                    move |data: &[i16], _| {
-                        if !started.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let mut pcm = Vec::with_capacity(data.len() * 2);
-                        for s in data {
-                            pcm.extend_from_slice(&s.to_le_bytes());
-                        }
-                        push(pcm);
-                    },
-                    |e| eprintln!("[audio] {e}"),
-                    None,
-                )
+        let mut pcm: Vec<u8> = Vec::with_capacity(8192);
+        let mut pushed = 0u64;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
             }
-            _ => {
-                let started = started.clone();
-                let push = push.clone();
-                device.build_input_stream(
-                    &config,
-                    move |data: &[f32], _| {
-                        if !started.load(Ordering::Relaxed) {
-                            return;
+            let mut packet = ep.capture.GetNextPacketSize().unwrap_or(0);
+            while packet > 0 {
+                let mut data: *mut u8 = std::ptr::null_mut();
+                let mut frames = 0u32;
+                let mut flags = 0u32;
+                if ep
+                    .capture
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+                    .is_err()
+                {
+                    break;
+                }
+                if frames > 0 {
+                    let bytes = frames * ep.block_align;
+                    if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+                        pcm.clear();
+                        pcm.resize(bytes as usize / if ep.is_float { 2 } else { 1 }, 0);
+                    } else {
+                        pcm.clear();
+                        let src = std::slice::from_raw_parts(data, bytes as usize);
+                        if ep.is_float {
+                            pcm.reserve(src.len() / 2);
+                            for chunk in src.chunks_exact(4) {
+                                let f = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                                let v = (f.clamp(-1.0, 1.0) * 32767.0) as i16;
+                                pcm.extend_from_slice(&v.to_le_bytes());
+                            }
+                        } else {
+                            pcm.extend_from_slice(src);
                         }
-                        let mut pcm = Vec::with_capacity(data.len() * 2);
-                        for s in data {
-                            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                            pcm.extend_from_slice(&v.to_le_bytes());
+                    }
+                    if started.load(Ordering::Relaxed) && !pcm.is_empty() {
+                        cb.lock().push_audio(&pcm);
+                        pushed += 1;
+                        if pushed == 1 {
+                            crate::log(&format!("audio first packet: {} bytes", pcm.len()));
                         }
-                        push(pcm);
-                    },
-                    |e| eprintln!("[audio] {e}"),
-                    None,
-                )
+                    }
+                }
+                let _ = ep.capture.ReleaseBuffer(frames);
+                packet = ep.capture.GetNextPacketSize().unwrap_or(0);
             }
-        };
-
-        let Ok(stream) = stream else {
-            return;
-        };
-        if stream.play().is_err() {
-            return;
+            std::thread::sleep(Duration::from_millis(8));
         }
-        while !stop.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(40));
-        }
-        drop(stream);
+        let _ = ep.client.Stop();
     })
 }

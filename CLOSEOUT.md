@@ -32,3 +32,33 @@
 ## 下一里程碑
 
 M3 系统声音（WASAPI loopback）——需先定「系统声 + 麦克风混音」的优先级策略。
+
+
+---
+
+# CLOSEOUT · M3 系统声音 v0.2.0
+
+日期：2026-11-02
+
+## 交付
+
+| # | 项 | 证据 |
+|---|---|---|
+| 1 | 音频改为 WASAPI loopback | `src/audio.rs` 重写，cpal 依赖删除 |
+| 2 | 工具条「系统声 开/关」 | 截图 + 实测点击 |
+| 3 | 440 Hz 音源录制命中 | DFT 峰值 = 440 Hz，max_volume −20.8 dB |
+| 4 | 体积下降 | 551,424 B → 498,176 B |
+| 5 | 旧 Electron 版 DogSC 清除 | `F:\tools\DogSC`、开始菜单 `DogSC.lnk`、`%APPDATA%\DogSC` 全部删除 |
+
+## 验收对照（SPEC B1–B5）
+
+- B1 ✅ 峰值频率 440 Hz
+- B2 ✅ max_volume −20.8 dB（远高于 −40 dB 阈值）
+- B3 ✅ AAC 48 kHz stereo
+- B4 ✅ 无设备时 `audio_cfg = None`，只录画面
+- B5 ✅ 体积减少 53 KB
+
+## 残留
+
+- 麦克风采集不在范围内（用户明确：只录系统声，不混音）
+- 仍无 CI

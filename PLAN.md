@@ -1,28 +1,21 @@
-# PLAN · M2 开源首发
+# PLAN · M3 系统声音
 
 ## 步骤
 
-1. **更名**（代码层）
-   - `Cargo.toml`: `name = "saicord"`
-   - 窗口类统一 `Saicord*` 前缀；日志 `F:\tmp\saicord.log`
-   - 安装到 `F:\tools\saicord\saicord.exe`，开始菜单 `saicord.lnk`
-2. **构建与实机验证**
-   - `cargo build --release`
-   - 框选 600×400 → 开始 → F9 → 桌面出片
-   - `ffprobe` 校验 + 抽帧查边框像素
-3. **文档**
-   - README / AGENTS / PROJECT_CONSTITUTION / TRACK_TREE / SPEC / PLAN / progress / HANDOFF
-   - `docs/adr/0001-capture-stack.md`
-   - `design-lock.json`、`LICENSE`、`CHANGELOG.md`
-4. **仓库**
-   - `gh repo create nakamotosai/saicord --public`
-   - push main，打 tag `v0.1.0`，建 release
-   - 加 Gitea 远端并推送
-5. **收口**
-   - 刷新 `F:\projects\INDEX.md` 行
-   - 项目本卡 upsert（stage=active）
-   - `CLOSEOUT.md` + `progress.md`
+1. **重写 `src/audio.rs`**
+   - `CoCreateInstance(CLSID_MMDeviceEnumerator)` → `GetDefaultAudioEndpoint(eRender, eConsole)`
+   - `IMMDevice::Activate::<IAudioClient>` → `GetMixFormat` → `Initialize(SHARED, LOOPBACK, 1s, 0, fmt)`
+   - `GetService::<IAudioCaptureClient>` → `Start` → 轮询 `GetNextPacketSize` / `GetBuffer` / `ReleaseBuffer`
+   - float32 → i16，`AUDCLNT_BUFFERFLAGS_SILENT` 时补零
+2. **Cargo 依赖调整**
+   - 删 `cpal`
+   - 加 feature：`Win32_Media_Audio`、`Win32_System_Com`、`Win32_System_Com_StructuredStorage`、`Win32_System_Variant`
+3. **UI 文案**：麦克风 → 系统声；`mic_*` 字段改名 `audio_*`
+4. **验证**
+   - 用 `System.Media.SoundPlayer` 循环播放 440 Hz WAV
+   - 录 3 秒 → `volumedetect` 看电平 → 解析音轨做 FFT 找峰值
+5. **收口**：CHANGELOG / README / HANDOFF / TRACK_TREE / progress / CLOSEOUT，tag v0.2.0
 
 ## 验证方式
 
-每步都有可观测产物：构建产物、mp4、`gh repo view` 输出、`git remote -v`、看板回读。
+`ffmpeg` 导出单声道 WAV → 8192 点 DFT 扫描 200–800 Hz → 峰值必须落在 440 Hz。
