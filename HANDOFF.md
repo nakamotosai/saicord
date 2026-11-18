@@ -34,7 +34,10 @@ cargo build --release          # 产物 target/release/saicord.exe
 - `windows-capture` 的 `start_free_threaded` 返回的 `CaptureControl`：先取 `callback()`，再 `stop()`（`stop` 会消费 self 并 join）
 - `IMMDevice::Activate` 需要 `Win32_System_Com_StructuredStorage` + `Win32_System_Variant` 两个 feature 同时开，否则方法根本不存在
 - 停止时顺序必须是：停音频 → 停采集 → `encoder.finish()`，否则音频会在封装结束后继续写入
-- 调试日志在 `F:\tmp\saicord.log`（只在出错时写）
+- 调试日志在 `%LOCALAPPDATA%\saicord\saicord.log`(只在出错时写)
+- **起录依赖系统的 MF 硬件编码**:`windows-capture` 的编码器写死 `MediaTranscoder::SetHardwareAccelerationEnabled(true)`。Windows 的 GRL 一旦缺失/过旧,MF 对硬件 MFT 的激活一律返回 `0xC00D715F MF_E_GRL_VERSION_TOO_LOW`,硬件转码拓扑建不起来,`rec::start` 直接失败(日志只有一行 `rec start failed: New handler error: ... 0xC00D6D60`,界面弹「启动录制失败」)
+  - 复现:`saicord.exe --test encode 1280 720 60 1 X.mp4` → `encode: open failed ... 0xC00D6D60`;同参数把硬件加速关掉就能过(软件编码本机实测 1080p120≈154fps、1440p120≈84fps、4K60≈41fps,1440p 以上顶不住 120fps)
+  - GRL 读自 `HKLM\SYSTEM\CurrentControlSet\Services\PEAuth` 的 `DataPath`(本机 = `C:\ProgramData\Microsoft\MF`)下的 `Active.GRL`;缺了就把它从 `C:\Windows\WinSxS\amd64_microsoft-windows-mfgrl_*\Active.GRL` 复制回去(需管理员,补完立刻生效,不用重启)
 
 ## 环境
 
