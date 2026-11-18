@@ -44,5 +44,4 @@ cargo build --release          # 产物 target/release/saicord.exe
 ## 环境
 
 - Rust 1.91 (MSVC)、Windows 11 25H2、3840×2160 @200%
-- 本机 VS BuildTools 装了但没在注册表注册(`vswhere -all -format json` 返回 `[]`),裸 shell 里 `cargo build` 会落到 Git 的 `link.exe` 报 `link: extra operand`;先 `call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"` 再 cargo(正解是 BuildTools `--repair`)
 - 无第三方运行时依赖;不需要 Node、ffmpeg
