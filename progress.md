@@ -106,3 +106,11 @@
 - 实测：造 v9.9.9 测试 release → 检测 newer=true → 下载替换成功（F:/tmp 副本自替换，881,664 字节）→ 装回 v0.6.0 后报「已是最新 0.6.0」；测试 release 已删
 - 踩坑两条：1) 早先想用 `cmd /c timeout & start` 延迟重启，引号被 cmd 解析坏（命令行里出现字面量 `\"`）；2) 直接用 `Command::new(exe)` 立刻起新进程，会撞上单实例互斥被判成第二实例→退出。终解：新进程带 `--wait-for <pid>`，先 OpenProcess+WaitForSingleObject 等旧进程退出再抢锁
 - 端到端实测：装 v0.6.0 → 造 v9.9.9 release → `--upgrade` → 下载替换 → 新进程等 0.21s → 正常启动（mutex lasterr=0）→ .old 自动清掉 → 只剩一个进程；测试 release 已删
+
+## 2026-11-18 ~ 2026-11-19 · v0.6.1 硬件编码自动降级 + 本机环境修复
+
+- **故障排查**：本机 `saicord` 起录失败 `0xC00D6D60`，用自建 `mfprobe` 证实是 Windows 缺 `C:\ProgramData\Microsoft\MF\Active.GRL`（路径来自 `HKLM\SYSTEM\CurrentControlSet\Services\PEAuth\DataPath`），致使全部硬件 MFT `ActivateObject` 返回 `0xC00D715F MF_E_GRL_VERSION_TOO_LOW`；从 `C:\Windows\WinSxS\amd64_microsoft-windows-mfgrl_*\` 复制回 `DataPath` 后免重启恢复（放 `System32` 无效、`sfc` 无改动）
+- **产品补强（v0.6.1）**：`crates.io` 最新 `windows-capture 2.0.1` 及上游 `master` 均写死 `SetHardwareAccelerationEnabled(true)` 且无开关；经确认**不提上游 PR**，改在本地 `vendor/windows-capture/` 打 additive 补丁（`VideoSettingsBuilder::hardware_acceleration(bool)`）并通过 `[patch.crates-io]` 挂载
+- `rec::start` 优先硬件编码，建不出拓扑时自动降级软件编码重试一次并写日志 + 弹一次提示；新增 `--no-hw` 强制软件编码；实测临时移走 `Active.GRL` 后仍可出片 163 帧（软件上限：1080p120≈154fps / 1440p120≈84fps / 4K60≈41fps）
+- **发布与部署**：commit `d4f6360` / `292130f` / `3f86e1c`，tag `v0.6.1` 双推 Gitea 与 GitHub，GitHub release 带 `saicord.exe`（891,392 B），本机 `F:\tools\saicord\saicord.exe` 已更新并重启托盘（PID 14044）
+- **本机工具链修复（2026-11-19）**：解决裸 shell `cargo build` 误落 Git `link.exe` 问题——查实系 `Setup.Configuration.Native.dll` 缺失且 MSI 判 `Present` 跳过，提权运行 VS BuildTools `setup.exe repair` 后恢复，裸 `rustc` 与 `cargo build --release` 均通过（同步更新 `HANDOFF.md` commit `30a65c3`）
