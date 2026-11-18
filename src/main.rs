@@ -290,7 +290,10 @@ fn test_mode(args: &[String]) {
                 started.clone(),
                 frame_count.clone(),
             ) {
-                Ok(c) => c,
+                Ok((c, hw)) => {
+                    log(&format!("capture: hardware_acceleration={hw}"));
+                    c
+                }
                 Err(e) => {
                     log(&format!("capture: start failed {e}"));
                     return;
@@ -342,7 +345,7 @@ fn test_mode(args: &[String]) {
                     started.clone(),
                     frame_count.clone(),
                 ) {
-                    Ok(c) => c,
+                    Ok((c, _)) => c,
                     Err(e) => {
                         log(&format!("loop {i}: start failed {e}"));
                         continue;
@@ -417,6 +420,8 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // --no-hw:强制软件编码(硬件编码在本机不可用时的兜底开关)
+    rec::set_software_only(argv.iter().any(|a| a == "--no-hw"));
     // 升级重启握手：等上一个进程退出，再走正常启动（抢单实例互斥）
     if let Some(i) = argv.iter().position(|a| a == "--wait-for") {
         if let Some(pid) = argv.get(i + 1).and_then(|p| p.parse::<u32>().ok()) {
@@ -1468,11 +1473,15 @@ unsafe fn begin_record() {
         a.first_frame.clone(),
         a.frame_count.clone(),
     ) {
-        Ok(ctl) => {
+        Ok((ctl, hw)) => {
             let cb = ctl.callback();
             a.ctl = Some(ctl);
             a.output = Some(out);
             a.audio_stop = Arc::new(AtomicBool::new(false));
+            if !hw {
+                log("rec: 硬件编码不可用,已降级为软件编码");
+                show_toast("硬件编码不可用,已用软件编码录制(高分辨率/高帧率可能掉帧)");
+            }
 
             if let Some(info) = a.audio_dev.filter(|_| a.audio_on) {
                 let handle = audio::spawn(info, cb, a.first_frame.clone(), a.audio_stop.clone());

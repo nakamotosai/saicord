@@ -1,0 +1,85 @@
+--- a/src/encoder.rs
++++ b/src/encoder.rs
+@@ -256,6 +256,7 @@
+     frame_rate: u32,
+     pixel_aspect_ratio: (u32, u32),
+     disabled: bool,
++    hardware_acceleration: bool,
+ }
+ 
+ impl VideoSettingsBuilder {
+@@ -276,6 +277,7 @@
+             width,
+             height,
+             disabled: false,
++            hardware_acceleration: true,
+         }
+     }
+ 
+@@ -322,7 +324,18 @@
+         self
+     }
+ 
+-    fn build(self) -> Result<(VideoEncodingProperties, bool), VideoEncoderError> {
++    /// Enables or disables Media Foundation hardware acceleration (default `true`).
++    ///
++    /// Hardware transcoding needs a hardware MFT that Media Foundation will activate.
++    /// When that is refused (revoked/blocked driver, missing or denied GRL, driver reset)
++    /// topology building fails and encoder construction returns a `0xC00D6D60`
++    /// (`MF_E_INVALIDMEDIATYPE`) error. Retrying with `false` forces the software encoder.
++    pub const fn hardware_acceleration(mut self, enabled: bool) -> Self {
++        self.hardware_acceleration = enabled;
++        self
++    }
++
++    fn build(self) -> Result<(VideoEncodingProperties, bool, bool), VideoEncoderError> {
+         let properties = VideoEncodingProperties::new()?;
+         properties.SetSubtype(&self.sub_type.to_hstring())?;
+         properties.SetBitrate(self.bitrate)?;
+@@ -332,7 +345,7 @@
+         properties.FrameRate()?.SetDenominator(1)?;
+         properties.PixelAspectRatio()?.SetNumerator(self.pixel_aspect_ratio.0)?;
+         properties.PixelAspectRatio()?.SetDenominator(self.pixel_aspect_ratio.1)?;
+-        Ok((properties, self.disabled))
++        Ok((properties, self.disabled, self.hardware_acceleration))
+     }
+ }
+ 
+@@ -868,7 +881,8 @@
+         let path = path.as_ref();
+         let media_encoding_profile = MediaEncodingProfile::new()?;
+ 
+-        let (video_encoding_properties_cfg, is_video_disabled) = video_settings.build()?;
++        let (video_encoding_properties_cfg, is_video_disabled, video_hw_accel) =
++            video_settings.build()?;
+         media_encoding_profile.SetVideo(&video_encoding_properties_cfg)?;
+         let (audio_encoding_properties_cfg, is_audio_disabled) = audio_settings.build()?;
+         media_encoding_profile.SetAudio(&audio_encoding_properties_cfg)?;
+@@ -932,7 +946,7 @@
+         )?;
+ 
+         let media_transcoder = MediaTranscoder::new()?;
+-        media_transcoder.SetHardwareAccelerationEnabled(true)?;
++        media_transcoder.SetHardwareAccelerationEnabled(video_hw_accel)?;
+ 
+         File::create(path)?;
+         let path = fs::canonicalize(path)?.to_string_lossy()[4..].to_string();
+@@ -1018,7 +1032,8 @@
+     ) -> Result<Self, VideoEncoderError> {
+         let media_encoding_profile = MediaEncodingProfile::new()?;
+ 
+-        let (video_encoding_properties_cfg, is_video_disabled) = video_settings.build()?;
++        let (video_encoding_properties_cfg, is_video_disabled, video_hw_accel) =
++            video_settings.build()?;
+         media_encoding_profile.SetVideo(&video_encoding_properties_cfg)?;
+         let (audio_encoding_properties_cfg, is_audio_disabled) = audio_settings.build()?;
+         media_encoding_profile.SetAudio(&audio_encoding_properties_cfg)?;
+@@ -1081,7 +1096,7 @@
+         )?;
+ 
+         let media_transcoder = MediaTranscoder::new()?;
+-        media_transcoder.SetHardwareAccelerationEnabled(true)?;
++        media_transcoder.SetHardwareAccelerationEnabled(video_hw_accel)?;
+ 
+         let transcode = media_transcoder
+             .PrepareMediaStreamSourceTranscodeAsync(&media_stream_source, &stream, &media_encoding_profile)?

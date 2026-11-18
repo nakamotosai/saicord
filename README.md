@@ -81,7 +81,14 @@ cargo build --release
 # target/release/saicord.exe
 ```
 
-需要 Rust 1.85+（依赖 `windows-capture` 使用 edition 2024）和 MSVC 工具链。
+需要 Rust 1.85+(依赖 `windows-capture` 使用 edition 2024)和 MSVC 工具链。
+
+## 排障
+
+- **起录那一下弹「启动录制失败」**:日志在 `%LOCALAPPDATA%\saicord\saicord.log`。saicord 优先用 GPU 硬件编码(Media Foundation),硬件编码建不出拓扑时会**自动降级为软件编码**并提示一次,仍能出片,只是高分辨率/高帧率可能掉帧。
+- `--no-hw` 直接强制软件编码(硬件编码在这台机器上不可用时用):`saicord.exe --no-hw`。
+- 想恢复硬件编码:日志里出现 `0xC00D6D60` / `0xC00D715F` 时说明本机 MF 的硬件编码被系统的 GRL 拦住了。把 `C:\Windows\WinSxS\amd64_microsoft-windows-mfgrl_*\Active.GRL` 与 `Pending.GRL` 复制到 `%ProgramData%\Microsoft\MF\`(需管理员,立即生效),再重启 saicord。
+- `vendor/windows-capture/`:上游 2.0.1 的本地补丁(给编码器加软件编码开关),原因与升级重打步骤见 `vendor/windows-capture/PATCH.md`。
 
 ## 已知限制
 

@@ -30,8 +30,10 @@ pub struct Flags {
     pub audio: Option<(u32, u16)>,
     pub fps: u32,
     pub started: Arc<AtomicBool>,
-    /// 已送达编码器的帧数（诊断用）
+    /// 已送达编码器的帧数(诊断用)
     pub frames: Arc<AtomicU64>,
+    /// 是否允许 Media Foundation 硬件编码(false = 强制软件编码)
+    pub hw: bool,
 }
 
 pub struct Recorder {
@@ -74,7 +76,8 @@ impl GraphicsCaptureApiHandler for Recorder {
         let video = VideoSettingsBuilder::new(w, h)
             .sub_type(VideoSettingsSubType::H264)
             .frame_rate(ctx.flags.fps)
-            .bitrate(bitrate);
+            .bitrate(bitrate)
+            .hardware_acceleration(ctx.flags.hw);
 
         let audio = match ctx.flags.audio {
             Some((rate, channels)) => AudioSettingsBuilder::new()
@@ -148,6 +151,25 @@ impl GraphicsCaptureApiHandler for Recorder {
     }
 }
 
+/// 硬件编码被系统拒绝时的可执行提示(GRL 缺失是最常见原因)。
+fn hw_hint(e: &RecError) -> &'static str {
+    let s = e.to_string();
+    if s.contains("0xC00D6D60") || s.contains("0xC00D715F") {
+        "硬件编码不可用(Media Foundation GRL 缺失或被吊销);修复:把 C:\\Windows\\WinSxS\\amd64_microsoft-windows-mfgrl_*\\Active.GRL 与 Pending.GRL 复制到 %ProgramData%\\Microsoft\\MF\\(需管理员)"
+    } else {
+        "硬件编码不可用"
+    }
+}
+
+/// `--no-hw`:进程级强制软件编码。
+static SOFTWARE_ONLY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_software_only(on: bool) {
+    SOFTWARE_ONLY.store(on, Ordering::Relaxed);
+}
+
+/// 启动采集与编码:优先硬件编码,建不出硬件拓扑时自动降级软件编码。
+/// 返回 (控制块, 是否用上了硬件编码)。
 pub fn start(
     monitor_index: usize,
     crop: (u32, u32, u32, u32),
@@ -156,6 +178,37 @@ pub fn start(
     fps: u32,
     started: Arc<AtomicBool>,
     frames: Arc<AtomicU64>,
+) -> Result<(Control, bool), RecError> {
+    if !SOFTWARE_ONLY.load(Ordering::Relaxed) {
+        match start_with(
+            monitor_index,
+            crop,
+            out.clone(),
+            audio,
+            fps,
+            started.clone(),
+            frames.clone(),
+            true,
+        ) {
+            Ok(c) => return Ok((c, true)),
+            Err(e) => crate::log(&format!(
+                "rec::start: {} ({e});改用软件编码重试",
+                hw_hint(&e)
+            )),
+        }
+    }
+    start_with(monitor_index, crop, out, audio, fps, started, frames, false).map(|c| (c, false))
+}
+
+fn start_with(
+    monitor_index: usize,
+    crop: (u32, u32, u32, u32),
+    out: String,
+    audio: Option<(u32, u16)>,
+    fps: u32,
+    started: Arc<AtomicBool>,
+    frames: Arc<AtomicU64>,
+    hw: bool,
 ) -> Result<Control, RecError> {
     let t0 = std::time::Instant::now();
     let monitor = windows_capture::monitor::Monitor::from_index(monitor_index)?;
@@ -175,12 +228,13 @@ pub fn start(
             fps,
             started,
             frames,
+            hw,
         },
     );
     let t1 = std::time::Instant::now();
     let ctl = Recorder::start_free_threaded(settings)?;
     crate::log(&format!(
-        "rec::start: monitor={:.0}ms thread={:.0}ms",
+        "rec::start: hw={hw} monitor={:.0}ms thread={:.0}ms",
         t_mon.as_secs_f64() * 1000.0,
         t1.elapsed().as_secs_f64() * 1000.0
     ));

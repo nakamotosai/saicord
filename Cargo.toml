@@ -26,6 +26,13 @@ windows = { version = "0.62", features = [
 windows-capture = "2.0.1"
 parking_lot = "0.12"
 
+# 本地补丁:上游 windows-capture 2.0.1 把硬件编码写死成 true,机器上硬件 MFT
+# 被系统拒绝(GRL 缺失/被吊销等)时起录直接失败且无退路。补丁给
+# VideoSettingsBuilder 加了 hardware_acceleration(bool),让 saicord 自动降级软件编码。
+# 见 vendor/windows-capture/PATCH.md(升级上游时怎么重打)。
+[patch.crates-io]
+windows-capture = { path = "vendor/windows-capture" }
+
 [profile.release]
 opt-level = 3
 lto = true
